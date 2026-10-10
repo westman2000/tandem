@@ -1,0 +1,33 @@
+package main
+
+import (
+	"context"
+	"embed"
+	"flag"
+	"fmt"
+	"io/fs"
+	"os"
+	"os/signal"
+	"syscall"
+	"tandem/internal/app"
+)
+
+//go:embed web/dist
+var assets embed.FS
+
+func main() {
+	address := flag.String("listen", "127.0.0.1:4317", "Local listen address")
+	data := flag.String("data", ".tandem", "Directory for local database and materials")
+	uiDir := flag.String("ui", "", "Development: serve UI from this directory instead of embedded assets")
+	flag.Parse()
+	ui, _ := fs.Sub(assets, "web/dist")
+	if *uiDir != "" {
+		ui = os.DirFS(*uiDir)
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	if err := app.Serve(ctx, *address, *data, ui); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}

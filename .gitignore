@@ -1,0 +1,10 @@
+.tandem/
+.tandem-preview/
+.tools/
+node_modules/
+release/
+*.log
+.DS_Store
+/tandem
+/web/dist/*
+!/web/dist/placeholder.txt
