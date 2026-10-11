@@ -30,8 +30,14 @@ let links = 0;
 for (const file of files.filter(f => f.endsWith('.md'))) {
   const absolute = path.join(root, file);
   if (!existsSync(absolute) || !lstatSync(absolute).isFile()) continue;
+  const raw = readFileSync(absolute, 'utf8');
+  // Scan code fences too. Report only the location, never the private value.
+  const homePath = /(?:\/(?:Users|home)\/[^\s/`"'<>]+|[a-z]:[\\/]+Users[\\/]+[^\s\\/`"'<>]+)/i;
+  for (const [index, line] of raw.split(/\r?\n/).entries()) {
+    if (homePath.test(line)) errors.push(`Nonportable home path in ${file}:${index + 1}; use a relative path or ~.`);
+  }
   // Check ordinary inline Markdown links; URL fragments and reference links are not validated.
-  const text = readFileSync(absolute, 'utf8').replace(/^(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\1[^\n]*$/gm, '');
+  const text = raw.replace(/^(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\1[^\n]*$/gm, '');
   for (const match of text.matchAll(/\[[^\]\n]*\]\((<[^>\n]+>|[^\s)]+)(?:\s+"[^"\n]*")?\)/g)) {
     const target = match[1].replace(/^<|>$/g, '');
     if (/^(?:[a-z][a-z0-9+.-]*:|#|\/\/)/i.test(target)) continue;

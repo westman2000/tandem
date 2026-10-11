@@ -29,6 +29,7 @@ Tandem is a local Go + React/TypeScript app coordinating Codex and Claude Code t
 - After a meaningful checkpoint or before handing off unfinished work, update `docs/STATUS.md`: task, branch, completed result, remaining work, blockers, verification and next concrete action.
 - Add a concise task entry to `docs/worklog/` for a substantive work session. Record decisions and results, not a transcript or hidden reasoning. Update architecture/roadmap only if affected; add a decision record for a consequential choice.
 - Stage only intended files. Keep commits focused, label unfinished checkpoints, and preserve others' changes. Do not force-push, reset shared history or overwrite divergent work to complete a handoff.
+- Before publishing, review documentation and commit identity for personal data. Use relative paths or `~` in instructions; never copy a developer's home path, private email, or machine name into public examples or logs. Describe a fresh clone, not an untracked local installation. Use the repository's public Git identity for new commits; historical identity changes need explicit authorization.
 - Use the user's authorized remote. Commit and push when saving/publishing is authorized by the request; do not ask again for an already authorized action. A commit is local until the remote acknowledges the push. If the network fails, record the pending branch/commit and report it accurately.
 - Parallel work uses separate branches/worktrees and explicit task ownership. Coordinate shared files; a status document is not a distributed lock.
 
