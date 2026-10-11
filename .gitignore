@@ -8,3 +8,16 @@ release/
 /tandem
 /web/dist/*
 !/web/dist/placeholder.txt
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+/tandem.exe
+.claude/settings.local.json
+CLAUDE.local.md
+.codex/auth.json
