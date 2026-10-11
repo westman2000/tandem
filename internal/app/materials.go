@@ -162,7 +162,10 @@ func (s *Store) SaveMaterial(project, name, role, mime string, data []byte) (Mat
 	}
 	hash := sha256.Sum256(data)
 	m := Material{ID: ID(), ProjectID: project, Name: name, Role: role, MIME: mime, Size: int64(len(data)), SHA256: hex.EncodeToString(hash[:]), Text: value, Warning: warning, CreatedAt: now()}
-	dir := filepath.Join(s.Dir, "materials")
+	if err := s.CheckFolder(); err != nil {
+		return m, err
+	}
+	dir := s.MaterialsDir()
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return m, err
 	}
@@ -178,6 +181,9 @@ func (s *Store) SaveMaterial(project, name, role, mime string, data []byte) (Mat
 }
 
 func (s *Store) Snapshot(r Run) error {
+	if err := s.CheckFolder(); err != nil {
+		return err
+	}
 	dir := filepath.Join(s.Dir, "runs", r.ID)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
@@ -188,7 +194,7 @@ func (s *Store) Snapshot(r Run) error {
 		}
 	}
 	for _, m := range r.Materials {
-		data, err := os.ReadFile(filepath.Join(s.Dir, "materials", m.ID))
+		data, err := os.ReadFile(filepath.Join(s.MaterialsDir(), m.ID))
 		if err != nil {
 			return err
 		}

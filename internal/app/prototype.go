@@ -83,6 +83,9 @@ func (e *Engine) CreatePrototype(project string, c PrototypeConfig) (Run, error)
 	}
 	if c.ParentDirectory == "" {
 		c.ParentDirectory = filepath.Join(e.Store.Dir, "prototypes")
+		if e.Store.Root != "" {
+			c.ParentDirectory = filepath.Join(e.Store.Root, "prototypes")
+		}
 		if err = os.MkdirAll(c.ParentDirectory, 0700); err != nil {
 			return Run{}, err
 		}
@@ -98,6 +101,9 @@ func (e *Engine) CreatePrototype(project string, c PrototypeConfig) (Run, error)
 	info, err := os.Stat(c.ParentDirectory)
 	if err != nil || !info.IsDir() {
 		return Run{}, errors.New("Укажите существующую родительскую папку")
+	}
+	if e.Store.Root != "" && !within(e.Store.Root, c.ParentDirectory) {
+		return Run{}, errors.New("Рабочую папку переносимого проекта создавайте внутри папки проекта")
 	}
 	var sourceCommit, sourceContext string
 	if c.SourceRepo != "" {
@@ -119,6 +125,13 @@ func (e *Engine) CreatePrototype(project string, c PrototypeConfig) (Run, error)
 		return Run{}, err
 	}
 	r := Run{ID: ID(), ProjectID: project, Kind: "prototype", Mode: "live", Status: "paused", Title: parent.Title, Brief: c.Hypothesis, CreatedAt: now(), UpdatedAt: now(), Models: parent.Models, LockedModels: parent.LockedModels, Sessions: map[string]string{}, Materials: parent.Materials, MaxRevisions: c.MaxRounds, Quality: "pending"}
+	if e.Store.Root != "" && c.SourceRepo != "" {
+		snapshot := filepath.Join(e.Store.Dir, "sources", r.ID)
+		if err = cloneSource(c.SourceRepo, snapshot, sourceCommit); err != nil {
+			return Run{}, err
+		}
+		c.SourceRepo = snapshot
+	}
 	if c.Availability.Policy == "" {
 		c.Availability.Policy = parent.AvailabilityPolicy
 	}

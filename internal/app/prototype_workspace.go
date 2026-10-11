@@ -75,6 +75,11 @@ func localRepository(path string) (string, error) {
 }
 func prepareWorkspace(ctx context.Context, s *Store, r Run) error {
 	p := r.Prototype
+	if s.Root != "" {
+		if err := noProjectLinks(s.Root, p.Workspace); err != nil {
+			return err
+		}
+	}
 	root := filepath.Dir(p.Workspace)
 	owner := filepath.Join(root, "owner")
 	if b, err := os.ReadFile(owner); err == nil {

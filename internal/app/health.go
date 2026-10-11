@@ -51,10 +51,11 @@ type HealthMonitor struct {
 	probe    func(context.Context, string) (AgentStatus, *QuotaReading, error)
 	next     time.Time
 	failures int
+	stores   map[*Store]bool
 }
 
 func NewHealthMonitor(s *Store) *HealthMonitor {
-	h := &HealthMonitor{store: s, refresh: make(chan struct{}, 1), records: map[string]savedHealth{}, probe: probeAgent}
+	h := &HealthMonitor{store: s, stores: map[*Store]bool{s: true}, refresh: make(chan struct{}, 1), records: map[string]savedHealth{}, probe: probeAgent}
 	rows, err := s.db.Query("SELECT body FROM agent_health")
 	if err == nil {
 		defer rows.Close()
@@ -214,15 +215,19 @@ func (h *HealthMonitor) saveLocked(agent string, v savedHealth) {
 	}
 	h.records[agent] = v
 	if v.Health.Notice != "" && v.Health.Notice != old.Health.Notice {
-		runs, _ := h.store.Runs("")
-		for _, r := range runs {
-			if r.Mode == "live" && (r.Status == "running" || r.Status == "paused" || r.Status == "failed") {
-				_ = h.store.Event(r.ID, agent, "health", v.Health.Notice)
-				_ = h.store.AddMessage(Message{ProjectID: r.ProjectID, RunID: r.ID, Actor: "system", Target: "all", Stage: "health", Text: agent + ": " + v.Health.Notice})
+		for store := range h.stores {
+			runs, _ := store.Runs("")
+			for _, r := range runs {
+				if r.Mode == "live" && (r.Status == "running" || r.Status == "paused" || r.Status == "failed") {
+					_ = store.Event(r.ID, agent, "health", v.Health.Notice)
+					_ = store.AddMessage(Message{ProjectID: r.ProjectID, RunID: r.ID, Actor: "system", Target: "all", Stage: "health", Text: agent + ": " + v.Health.Notice})
+				}
 			}
 		}
 	}
 }
+func (h *HealthMonitor) AddStore(s *Store)    { h.mu.Lock(); defer h.mu.Unlock(); h.stores[s] = true }
+func (h *HealthMonitor) RemoveStore(s *Store) { h.mu.Lock(); defer h.mu.Unlock(); delete(h.stores, s) }
 func healthNotice(h AgentHealth) string {
 	if h.Issue != nil {
 		return h.Issue.Detail

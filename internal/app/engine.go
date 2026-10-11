@@ -220,6 +220,9 @@ func (e *Engine) Resume(id string) (Run, error) {
 	return e.startLocked(id)
 }
 func (e *Engine) startLocked(id string) (Run, error) {
+	if err := e.Store.CheckWritable(); err != nil {
+		return Run{}, fmt.Errorf("Не удаётся сохранить проект: %w", err)
+	}
 	if e.closing {
 		return Run{}, errors.New("Сервер завершает работу")
 	}
@@ -232,6 +235,13 @@ func (e *Engine) startLocked(id string) (Run, error) {
 	}
 	if r.Status != "paused" && r.Status != "failed" {
 		return r, errors.New("Продолжить можно приостановленный цикл")
+	}
+	if r.Prototype != nil && r.Prototype.Plan != nil {
+		checks := toolChecks(r.Prototype.Plan)
+		if missingTools(checks) {
+			_, _ = e.Store.UpdateRun(id, func(r *Run) { r.Prototype.Tools = checks })
+			return r, errors.New("Проверьте инструменты сборки на этой машине перед продолжением")
+		}
 	}
 	for activeID := range e.active {
 		a, err := e.Store.Run(activeID)
@@ -264,6 +274,7 @@ func (e *Engine) startLocked(id string) (Run, error) {
 	_ = e.Store.Event(id, "system", "resumed", "Выполнение начато с последнего сохранённого этапа")
 	ctx, cancel := context.WithCancel(context.Background())
 	e.active[id] = cancel
+	e.watchStorage(ctx, cancel)
 	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()
@@ -274,6 +285,33 @@ func (e *Engine) startLocked(id string) (Run, error) {
 		e.mu.Unlock()
 	}()
 	return r, nil
+}
+
+func (e *Engine) watchStorage(ctx context.Context, cancel context.CancelFunc) {
+	e.wg.Add(1)
+	go func() {
+		defer e.wg.Done()
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := e.Store.CheckWritable(); err != nil {
+					e.Store.faultMu.Lock()
+					recovery := "Восстановите доступ и нажмите «Указать расположение»"
+					if e.Store.Root == "" {
+						recovery = "Восстановите доступ к диску и перезапустите Tandem"
+					}
+					e.Store.fault = "Запись проекта недоступна. Работа остановлена. " + recovery + ": " + err.Error()
+					e.Store.faultMu.Unlock()
+					cancel()
+					return
+				}
+			}
+		}
+	}()
 }
 func (e *Engine) Pause(id string) (Run, error) {
 	e.mu.Lock()
@@ -523,7 +561,15 @@ func (e *Engine) performOnce(ctx context.Context, r Run, task Task) error {
 			return err
 		}
 	}
-	return e.Store.CommitTask(r.ID, task.ID, result.Text, result.Model)
+	if err := e.Store.CommitTask(r.ID, task.ID, result.Text, result.Model); err != nil {
+		return err
+	}
+	if _, err = e.Store.SyncDocuments(r.ProjectID); err != nil {
+		// The answer is already committed. An export failure must not cause the
+		// model request to run again or overwrite that completed checkpoint.
+		_ = e.Store.Event(r.ID, "system", "document_export", "Редакция сохранена в истории, но запись Markdown недоступна: "+err.Error())
+	}
+	return nil
 }
 
 func (e *Engine) prompt(r Run, task Task) (string, error) {

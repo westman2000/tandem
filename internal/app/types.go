@@ -3,11 +3,14 @@ package app
 import "time"
 
 type Project struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	Brief     string `json:"brief"`
-	CreatedAt string `json:"createdAt"`
-	UpdatedAt string `json:"updatedAt"`
+	Directory   string `json:"directory,omitempty"`
+	FolderState string `json:"folderState,omitempty"`
+	FolderError string `json:"folderError,omitempty"`
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Brief       string `json:"brief"`
+	CreatedAt   string `json:"createdAt"`
+	UpdatedAt   string `json:"updatedAt"`
 }
 
 type Message struct {

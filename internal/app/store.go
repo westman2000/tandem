@@ -16,10 +16,16 @@ import (
 )
 
 type Store struct {
-	db   *sql.DB
-	mu   sync.Mutex
-	Dir  string
-	lock *os.File
+	db       *sql.DB
+	mu       sync.Mutex
+	Dir      string
+	lock     *os.File
+	Root     string
+	rootInfo os.FileInfo
+	dbInfo   os.FileInfo
+	docMu    sync.Mutex
+	faultMu  sync.RWMutex
+	fault    string
 }
 
 func ID() string {
@@ -45,6 +51,7 @@ func OpenStore(dir string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	_, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
+	 CREATE TABLE IF NOT EXISTS document_imports(file TEXT PRIMARY KEY, hash TEXT NOT NULL);
 	 CREATE TABLE IF NOT EXISTS agent_health(agent TEXT PRIMARY KEY, body TEXT NOT NULL);
 	 CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, status INTEGER NOT NULL DEFAULT 0, body TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
 	 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, body TEXT NOT NULL);
@@ -66,6 +73,10 @@ func OpenStore(dir string) (*Store, error) {
 
 func (s *Store) Close() error { err := s.db.Close(); s.lock.Close(); return err }
 func (s *Store) PutProject(p Project) error {
+	if err := s.CheckFolder(); err != nil {
+		return err
+	}
+	p.Directory, p.FolderState, p.FolderError = "", "", ""
 	body, err := json.Marshal(p)
 	if err != nil {
 		return err
@@ -79,6 +90,9 @@ func (s *Store) Project(id string) (Project, error) {
 	err := s.db.QueryRow("SELECT body FROM projects WHERE id=?", id).Scan(&body)
 	if err == nil {
 		err = json.Unmarshal([]byte(body), &p)
+	}
+	if s.Root != "" {
+		p.Directory, p.FolderState = s.Root, "ready"
 	}
 	return p, err
 }
@@ -103,6 +117,10 @@ func (s *Store) Projects() ([]Project, error) {
 	return out, rows.Err()
 }
 func (s *Store) PutRun(r Run) error {
+	if err := s.CheckFolder(); err != nil {
+		return err
+	}
+	r = s.diskRun(r)
 	b, err := json.Marshal(r)
 	if err != nil {
 		return err
@@ -117,6 +135,7 @@ func (s *Store) Run(id string) (Run, error) {
 	if err == nil {
 		err = json.Unmarshal([]byte(b), &r)
 	}
+	r = s.liveRun(r)
 	return r, err
 }
 func (s *Store) UpdateRun(id string, update func(*Run)) (Run, error) {
@@ -153,11 +172,15 @@ func (s *Store) Runs(project string) ([]Run, error) {
 		if err = json.Unmarshal([]byte(b), &r); err != nil {
 			return nil, err
 		}
+		r = s.liveRun(r)
 		out = append(out, r)
 	}
 	return out, rows.Err()
 }
 func (s *Store) AddMessage(m Message) error {
+	if err := s.CheckFolder(); err != nil {
+		return err
+	}
 	if m.ID == "" {
 		m.ID = ID()
 	}
@@ -192,6 +215,9 @@ func (s *Store) Messages(project string) ([]Message, error) {
 	return out, rows.Err()
 }
 func (s *Store) AddMaterial(m Material) error {
+	if err := s.CheckFolder(); err != nil {
+		return err
+	}
 	b, err := json.Marshal(m)
 	if err != nil {
 		return err
@@ -229,10 +255,16 @@ func (s *Store) Materials(project string) ([]Material, error) {
 	return out, rows.Err()
 }
 func (s *Store) DeleteMaterial(id string) error {
+	if err := s.CheckFolder(); err != nil {
+		return err
+	}
 	_, err := s.db.Exec("DELETE FROM materials WHERE id=?", id)
 	return err
 }
 func (s *Store) Event(run, agent, kind, text string) error {
+	if err := s.CheckFolder(); err != nil {
+		return err
+	}
 	_, err := s.db.Exec("INSERT INTO events(run_id,agent,kind,text,created_at) VALUES(?,?,?,?,?)", run, agent, kind, text, now())
 	return err
 }
@@ -260,6 +292,9 @@ func (s *Store) events(run string, all bool) ([]Event, error) {
 
 // CommitTask saves the checkpoint and visible answer in one transaction.
 func (s *Store) CommitTask(runID, taskID, answer string, models ...string) error {
+	if err := s.CheckFolder(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r, err := s.Run(runID)
@@ -311,7 +346,7 @@ func (s *Store) CommitTask(runID, taskID, answer string, models ...string) error
 		r.NeedsReview = task.SelfReview
 	}
 	m := Message{RequestedAgent: task.RequestedAgent, SelfReview: task.SelfReview, ID: ID(), ProjectID: r.ProjectID, RunID: r.ID, Actor: task.Agent, Model: task.Model, Target: "all", Text: answer, Stage: task.Stage, Demo: r.Mode == "demo", CreatedAt: now()}
-	rb, _ := json.Marshal(r)
+	rb, _ := json.Marshal(s.diskRun(r))
 	mb, _ := json.Marshal(m)
 	tx, err := s.db.Begin()
 	if err != nil {

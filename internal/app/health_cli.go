@@ -76,7 +76,7 @@ func codexQuotaRPC(w io.Writer, r io.Reader) (string, *QuotaReading, error) {
 		}
 		return nil, io.ErrUnexpectedEOF
 	}
-	if _, err := call(1, "initialize", map[string]any{"clientInfo": map[string]string{"name": "tandem_monitor", "title": "Tandem", "version": "0.5.1"}}); err != nil {
+	if _, err := call(1, "initialize", map[string]any{"clientInfo": map[string]string{"name": "tandem_monitor", "title": "Tandem", "version": "0.6.0"}}); err != nil {
 		return "", nil, err
 	}
 	if err := encoder.Encode(map[string]any{"method": "initialized", "params": map[string]any{}}); err != nil {

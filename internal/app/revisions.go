@@ -65,6 +65,9 @@ func (s *Store) Revisions(project string) ([]Revision, error) {
 	return out, nil
 }
 func (s *Store) ApproveRevision(project, id string) (Revision, error) {
+	if err := s.CheckFolder(); err != nil {
+		return Revision{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	revisions, err := s.Revisions(project)

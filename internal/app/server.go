@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,10 +18,11 @@ import (
 )
 
 type Server struct {
-	Store  *Store
-	Engine *Engine
-	Token  string
-	UI     fs.FS
+	Library *Library
+	Store   *Store
+	Engine  *Engine
+	Token   string
+	UI      fs.FS
 }
 
 func NewServer(s *Store, e *Engine, ui fs.FS) *Server {
@@ -81,6 +83,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			problem(w, 403, errors.New("Обновите страницу и повторите действие"))
 			return
 		}
+		// Receipts from the former shared store remain authoritative after a
+		// project moves. Do not replay a lost legacy action in its new store.
+		if s.Library != nil && r.Method != "GET" && r.Header.Get("X-Tandem-Request") != "" {
+			var exists int
+			err := s.Store.db.QueryRow("SELECT 1 FROM requests WHERE id=?", r.Header.Get("X-Tandem-Request")).Scan(&exists)
+			if err == nil {
+				s.mutate(w, r)
+				return
+			}
+			if err != sql.ErrNoRows {
+				problem(w, 503, errors.New("Не удалось проверить предыдущее действие. Новая попытка не запущена"))
+				return
+			}
+		}
+		if s.Library != nil && s.Library.dispatch(w, r) {
+			return
+		}
 		if r.Method == "GET" {
 			s.api(w, r)
 		} else {
@@ -112,6 +131,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/"), "/")
 	parts := strings.Split(path, "/")
+	if s.Library != nil && s.libraryAPI(w, r, parts) {
+		return
+	}
 	if s.developmentAPI(w, r, parts) {
 		return
 	}
@@ -121,7 +143,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			problem(w, 500, err)
 			return
 		}
-		respond(w, 200, map[string]any{"token": s.Token, "projects": p, "version": "0.5.1", "dataDir": s.Store.Dir})
+		respond(w, 200, map[string]any{"token": s.Token, "projects": p, "version": "0.6.0", "dataDir": s.Store.Dir})
 		return
 	}
 	if path == "models" && r.Method == "GET" {
@@ -188,6 +210,10 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(parts) == 2 && r.Method == "GET" {
+			changes, docErr := s.Store.SyncDocuments(p.ID)
+			if docErr != nil {
+				p.FolderError = docErr.Error()
+			}
 			messages, err := s.Store.Messages(p.ID)
 			if err != nil {
 				problem(w, 500, err)
@@ -208,7 +234,31 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 				problem(w, 500, err)
 				return
 			}
-			respond(w, 200, map[string]any{"project": p, "messages": messages, "materials": materials, "runs": runs, "revisions": revisions})
+			respond(w, 200, map[string]any{"project": p, "messages": messages, "materials": materials, "runs": runs, "revisions": revisions, "documentChanges": changes})
+			return
+		}
+		if len(parts) == 3 && parts[2] == "import-document" && r.Method == "POST" {
+			var in DocumentChange
+			if err := decode(w, r, &in); err != nil {
+				problem(w, 400, err)
+				return
+			}
+			s.Engine.mu.Lock()
+			for id := range s.Engine.active {
+				active, _ := s.Store.Run(id)
+				if active.ProjectID == p.ID {
+					s.Engine.mu.Unlock()
+					problem(w, 409, errors.New("Сначала поставьте обсуждение на паузу"))
+					return
+				}
+			}
+			run, err := s.Store.ImportDocument(p.ID, in.File, in.SHA256)
+			s.Engine.mu.Unlock()
+			if err != nil {
+				problem(w, 409, err)
+			} else {
+				respond(w, 201, run)
+			}
 			return
 		}
 		if len(parts) == 3 && parts[2] == "runs" && r.Method == "POST" {
@@ -533,12 +583,19 @@ func Serve(ctx context.Context, address, data string, ui fs.FS) error {
 	}
 	engine := NewEngine(store, CLIRunner{})
 	monitorCtx, stopMonitor := context.WithCancel(ctx)
+	defer stopMonitor()
 	engine.Health = NewHealthMonitor(store)
+	handler := NewServer(store, engine, ui)
+	library, err := NewLibrary(handler)
+	if err != nil {
+		return err
+	}
+	defer library.Close()
 	monitorDone := make(chan struct{})
 	go func() { defer close(monitorDone); engine.Health.Start(monitorCtx) }()
 	defer func() { stopMonitor(); <-monitorDone }()
 	defer engine.Close()
-	server := &http.Server{Addr: address, Handler: NewServer(store, engine, ui), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 16}
+	server := &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 16}
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return err

@@ -1,4 +1,6 @@
 let token = '';
+export class APIError extends Error {status:number;constructor(message:string,status:number){super(message);this.status=status;}}
+export function projectPath(path:string,project:string){return project&&/^(runs|materials)\//.test(path)?`projects/${project}/api/${path}`:path;}
 export function setToken(value: string) { token = value; }
 export class UncertainAction extends Error { receiptKey:string;constructor(message:string,receiptKey:string){super(message);this.name='UncertainAction';this.receiptKey=receiptKey;} }
 export function allowNewAttempt(key:string){memory.delete(key);try{localStorage.removeItem(key);}catch{}}
@@ -28,7 +30,7 @@ export async function api<T>(path: string, method = 'GET', body?: unknown): Prom
   for (let attempt = 0; attempt < 2; attempt++) {
     const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), method === 'GET' ? 12000 : 60000);
     let response: Response; let value: any;
-    try { response = await fetch(`/api/${path}`, { method, signal: controller.signal, headers: { ...(id ? { 'X-Tandem-Token': token, 'X-Tandem-Request': id } : {}), ...(!form && body ? { 'Content-Type': 'application/json' } : {}) }, body: body ? (form ? body : JSON.stringify(body)) : undefined }); value = await response.json(); }
+    try { response = await fetch(`/api/${path}`, { method, signal: controller.signal, headers: { ...(token?{'X-Tandem-Token':token}:{}), ...(id ? { 'X-Tandem-Request': id } : {}), ...(!form && body ? { 'Content-Type': 'application/json' } : {}) }, body: body ? (form ? body : JSON.stringify(body)) : undefined }); value = await response.json(); }
     catch { throw new Error(method === 'GET' ? 'Нет связи с Tandem. Проверяем соединение…' : 'Подтверждение от Tandem не получено. Обновите состояние проекта и повторите то же действие: сохранённый ID защитит от дубликата.'); }
     finally { clearTimeout(timeout); }
     if (response.status === 403 && id && attempt === 0) {
@@ -37,7 +39,7 @@ export async function api<T>(path: string, method = 'GET', body?: unknown): Prom
     }
     // Lost/truncated response or an uncertain server outcome keeps its receipt.
     if (value !== null && !response.headers.has('X-Tandem-Pending')) {memory.delete(key);try{localStorage.removeItem(key);}catch{}}
-    if (!response.ok) {if(response.headers.has('X-Tandem-Uncertain')){const issue=new UncertainAction(value?.error||'Результат действия неизвестен',key);if(typeof window!=='undefined')window.dispatchEvent(new CustomEvent('tandem-uncertain',{detail:issue}));throw issue;}throw new Error(value?.error || `Ошибка ${response.status}`);}
+    if (!response.ok) {if(response.headers.has('X-Tandem-Uncertain')){const issue=new UncertainAction(value?.error||'Результат действия неизвестен',key);if(typeof window!=='undefined')window.dispatchEvent(new CustomEvent('tandem-uncertain',{detail:issue}));throw issue;}throw new APIError(value?.error || `Ошибка ${response.status}`,response.status);}
     if (value === null) throw new Error('Ответ Tandem оборвался. Обновите состояние проекта; повтор того же действия защищён от дубликата.');
     return value as T;
   }
