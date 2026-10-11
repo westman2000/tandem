@@ -94,7 +94,7 @@ func agentStatus(ctx context.Context, agent string) AgentStatus {
 	}
 	switch {
 	case s.Subscription:
-		s.Detail = "Подписка подключена"
+		s.Detail = "Вход по подписке подтверждён; остаток лимита не проверяется"
 	case s.Authenticated:
 		s.Detail = "Вход найден, но подписка не подтверждена. Войдите через официальный CLI"
 	default:
@@ -137,12 +137,13 @@ func commandArgs(in AgentInput) []string {
 }
 
 type streamState struct {
-	session   string
-	model     string
-	answer    strings.Builder
-	final     string
-	failure   string
-	completed bool
+	unavailable *AgentUnavailableError
+	session     string
+	model       string
+	answer      strings.Builder
+	final       string
+	failure     string
+	completed   bool
 }
 
 func (s *streamState) parse(agent string, line []byte, emit func(string, string)) {
@@ -156,6 +157,18 @@ func (s *streamState) parse(agent string, line []byte, emit func(string, string)
 		return v
 	}
 	typ := str(e, "type")
+	var bad bool
+	_ = json.Unmarshal(e["is_error"], &bad)
+	errorPayload := typ == "turn.failed" || typ == "error" || typ == "result" && bad || typ == "assistant" && str(e, "error") != ""
+	if errorPayload {
+		if problem := unavailableDiagnostic(agent, string(line)); problem != nil {
+			s.unavailable = problem
+		}
+	}
+	if typ == "turn.completed" || typ == "result" && !bad {
+		s.unavailable = nil
+	}
+
 	if agent == "codex" {
 		if typ == "turn.completed" {
 			s.completed = true
@@ -241,6 +254,9 @@ func (CLIRunner) Run(ctx context.Context, in AgentInput, emit func(string, strin
 		return AgentResult{}, err
 	}
 	if err = cmd.Start(); err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return AgentResult{}, &AgentUnavailableError{Agent: in.Agent, Kind: "missing_cli", Detail: "Официальный CLI не найден в PATH"}
+		}
 		return AgentResult{}, fmt.Errorf("Не удалось запустить %s: %w", in.Agent, err)
 	}
 	state := streamState{}
@@ -268,6 +284,14 @@ func (CLIRunner) Run(ctx context.Context, in AgentInput, emit func(string, strin
 	}
 	if scanErr != nil {
 		return result, errors.New("Слишком большой или повреждённый поток ответа")
+	}
+	if state.unavailable != nil {
+		return result, state.unavailable
+	}
+	if err != nil {
+		if problem := unavailableDiagnostic(in.Agent, stderr.String()); problem != nil {
+			return result, problem
+		}
 	}
 	if state.failure != "" {
 		return result, errors.New(state.failure)

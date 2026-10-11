@@ -117,7 +117,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			problem(w, 500, err)
 			return
 		}
-		respond(w, 200, map[string]any{"token": s.Token, "projects": p, "version": "0.3.0", "dataDir": s.Store.Dir})
+		respond(w, 200, map[string]any{"token": s.Token, "projects": p, "version": "0.4.0", "dataDir": s.Store.Dir})
 		return
 	}
 	if path == "models" && r.Method == "GET" {
@@ -181,23 +181,24 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(parts) == 3 && parts[2] == "runs" && r.Method == "POST" {
 			var in struct {
-				Mode         string            `json:"mode"`
-				Brief        string            `json:"brief"`
-				MaxRevisions int               `json:"maxRevisions"`
-				Acceptance   string            `json:"acceptance"`
-				Models       map[string]string `json:"models"`
+				Availability AvailabilityOptions `json:"availability"`
+				Mode         string              `json:"mode"`
+				Brief        string              `json:"brief"`
+				MaxRevisions int                 `json:"maxRevisions"`
+				Acceptance   string              `json:"acceptance"`
+				Models       map[string]string   `json:"models"`
 			}
 			if err := decode(w, r, &in); err != nil {
 				problem(w, 400, err)
 				return
 			}
-			if in.Mode == "live" && !s.checkAgents(w, r.Context()) {
+			if in.Mode == "live" && !s.checkAvailability(w, r.Context(), &in.Availability) {
 				return
 			}
 			if in.MaxRevisions == 0 {
 				in.MaxRevisions = DefaultRevisions
 			}
-			run, err := s.Engine.Create(p.ID, in.Mode, in.Brief, in.MaxRevisions, in.Acceptance, in.Models)
+			run, err := s.Engine.CreateConfigured(p.ID, in.Mode, in.Brief, in.MaxRevisions, in.Acceptance, in.Models, in.Availability)
 			if err != nil {
 				problem(w, 409, err)
 				return
@@ -306,6 +307,36 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(parts) == 3 && r.Method == "POST" {
 			switch parts[2] {
+			case "availability":
+				var in struct {
+					AvailabilityOptions
+					ReturnAgent string `json:"returnAgent"`
+				}
+				if err := decode(w, r, &in); err != nil {
+					problem(w, 400, err)
+					return
+				}
+				run, err = s.Engine.SetAvailability(run.ID, in.AvailabilityOptions, in.ReturnAgent)
+			case "independent-review":
+				var in struct {
+					TaskID  string `json:"taskId"`
+					BuildID string `json:"buildId"`
+				}
+				if err := decode(w, r, &in); err != nil {
+					problem(w, 400, err)
+					return
+				}
+				artifact, artifactErr := auditArtifact(run, in.TaskID, in.BuildID)
+				if artifactErr != nil {
+					problem(w, 409, artifactErr)
+					return
+				}
+				a := agentStatus(r.Context(), otherAgent(artifact.Agent))
+				if !a.Subscription {
+					problem(w, 409, fmt.Errorf("%s: %s", a.Agent, a.Detail))
+					return
+				}
+				run, err = s.Engine.RequestAudit(run.ID, in.TaskID, in.BuildID)
 			case "continue":
 				var in struct {
 					MaxRevisions int    `json:"maxRevisions"`
@@ -315,14 +346,14 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 					problem(w, 400, err)
 					return
 				}
-				if run.Mode == "live" && !s.checkAgents(w, r.Context()) {
+				if run.Mode == "live" && !s.checkRunAgents(w, r.Context(), run) {
 					return
 				}
 				run, err = s.Engine.Continue(run.ID, in.MaxRevisions, in.Instruction)
 			case "pause":
 				run, err = s.Engine.Pause(run.ID)
 			case "resume":
-				if run.Mode == "live" && !s.checkAgents(w, r.Context()) {
+				if run.Mode == "live" && !s.checkRunAgents(w, r.Context(), run) {
 					return
 				}
 				run, err = s.Engine.Resume(run.ID)
@@ -343,14 +374,84 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-func (s *Server) checkAgents(w http.ResponseWriter, ctx context.Context) bool {
-	for _, a := range AgentStatuses(ctx) {
-		if !a.Subscription {
-			problem(w, 409, fmt.Errorf("%s: %s. В терминале: %s", a.Agent, a.Detail, a.LoginCommand))
-			return false
+// Authentication confirms subscription billing, not remaining quota.
+func availableSubscriptions(a AvailabilityOptions, statuses []AgentStatus) (map[string]AgentIssue, error) {
+	a, err := normalizeAvailability(a)
+	if err != nil {
+		return nil, err
+	}
+	issues := map[string]AgentIssue{}
+	for k, v := range a.Issues {
+		issues[k] = v
+	}
+	if a.UnavailableAgent != "" {
+		issues[a.UnavailableAgent] = AgentIssue{Kind: "manual", Detail: "Участник отключён пользователем", Since: now()}
+	}
+	available := 0
+	for _, s := range statuses {
+		if _, blocked := issues[s.Agent]; blocked {
+			continue
 		}
+		if s.Subscription {
+			available++
+			continue
+		}
+		kind := "auth"
+		if !s.Installed {
+			kind = "missing_cli"
+		}
+		issues[s.Agent] = AgentIssue{Kind: kind, Detail: s.Detail + ". В терминале: " + s.LoginCommand, Since: now()}
+	}
+	if available == 0 {
+		return issues, errors.New("Нет доступных участников с входом по подписке. Восстановите доступ и разрешите повторный запрос")
+	}
+	if a.Policy != "solo" && len(issues) > 0 {
+		return issues, errors.New("Участник недоступен. Восстановите доступ или выберите продолжение одним агентом")
+	}
+	return issues, nil
+}
+func (s *Server) checkAvailability(w http.ResponseWriter, ctx context.Context, a *AvailabilityOptions) bool {
+	issues, err := availableSubscriptions(*a, AgentStatuses(ctx))
+	a.Issues = issues
+	if err != nil {
+		problem(w, 409, err)
+		return false
 	}
 	return true
+}
+func (s *Server) checkRunAgents(w http.ResponseWriter, ctx context.Context, r Run) bool {
+	// An independent audit needs only its reviewer, even under the wait policy.
+	if r.ActiveAuditID != "" {
+		for _, audit := range r.Audits {
+			if audit.ID == r.ActiveAuditID {
+				if issue, blocked := r.Unavailable[audit.Agent]; blocked {
+					problem(w, 409, issueError(audit.Agent, issue))
+					return false
+				}
+				a := agentStatus(ctx, audit.Agent)
+				if !a.Subscription {
+					problem(w, 409, fmt.Errorf("%s: %s", a.Agent, a.Detail))
+					return false
+				}
+				return true
+			}
+		}
+		problem(w, 409, errors.New("Не найдена задача независимого ревью"))
+		return false
+	}
+	a := AvailabilityOptions{Policy: r.AvailabilityPolicy, Issues: r.Unavailable}
+	okay := s.checkAvailability(w, ctx, &a)
+	for agent, issue := range a.Issues {
+		if _, known := r.Unavailable[agent]; !known {
+			if err := s.Engine.markUnavailable(r.ID, &AgentUnavailableError{Agent: agent, Kind: issue.Kind, Detail: issue.Detail}); err != nil {
+				if okay {
+					problem(w, 500, err)
+				}
+				return false
+			}
+		}
+	}
+	return okay
 }
 
 func Serve(ctx context.Context, address, data string, ui fs.FS) error {

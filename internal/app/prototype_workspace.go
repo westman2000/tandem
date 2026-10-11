@@ -252,7 +252,7 @@ func validateProposal(p CodeProposal) error {
 func applyProposal(ctx context.Context, r Run, t Task, proposal CodeProposal) (Build, error) {
 	p := r.Prototype
 	w := p.Workspace
-	b := Build{ID: t.ID, TaskID: t.ID, Number: len(p.Builds) + 1, CreatedAt: now(), Summary: proposal.Summary, Limitations: proposal.Limitations, Checks: []CheckResult{}}
+	b := Build{Author: t.Agent, ID: t.ID, TaskID: t.ID, Number: len(p.Builds) + 1, CreatedAt: now(), Summary: proposal.Summary, Limitations: proposal.Limitations, Checks: []CheckResult{}}
 	if err := validateProposal(proposal); err != nil {
 		return b, err
 	}

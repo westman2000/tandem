@@ -11,16 +11,18 @@ type Project struct {
 }
 
 type Message struct {
-	Model     string `json:"model,omitempty"`
-	ID        string `json:"id"`
-	ProjectID string `json:"projectId"`
-	RunID     string `json:"runId"`
-	Actor     string `json:"actor"`
-	Target    string `json:"target"`
-	Text      string `json:"text"`
-	Stage     string `json:"stage"`
-	Demo      bool   `json:"demo"`
-	CreatedAt string `json:"createdAt"`
+	RequestedAgent string `json:"requestedAgent,omitempty"`
+	SelfReview     bool   `json:"selfReview,omitempty"`
+	Model          string `json:"model,omitempty"`
+	ID             string `json:"id"`
+	ProjectID      string `json:"projectId"`
+	RunID          string `json:"runId"`
+	Actor          string `json:"actor"`
+	Target         string `json:"target"`
+	Text           string `json:"text"`
+	Stage          string `json:"stage"`
+	Demo           bool   `json:"demo"`
+	CreatedAt      string `json:"createdAt"`
 }
 
 type Material struct {
@@ -37,41 +39,51 @@ type Material struct {
 }
 
 type Task struct {
-	Model      string `json:"model,omitempty"`
-	ID         string `json:"id"`
-	Agent      string `json:"agent"`
-	Stage      string `json:"stage"`
-	Phase      int    `json:"phase"`
-	Status     string `json:"status"`
-	Output     string `json:"output"`
-	StartedAt  string `json:"startedAt,omitempty"`
-	FinishedAt string `json:"finishedAt,omitempty"`
+	RequestedAgent string `json:"requestedAgent,omitempty"`
+	SelfReview     bool   `json:"selfReview,omitempty"`
+	ArtifactTaskID string `json:"artifactTaskId,omitempty"`
+	BuildID        string `json:"buildId,omitempty"`
+	Model          string `json:"model,omitempty"`
+	ID             string `json:"id"`
+	Agent          string `json:"agent"`
+	Stage          string `json:"stage"`
+	Phase          int    `json:"phase"`
+	Status         string `json:"status"`
+	Output         string `json:"output"`
+	StartedAt      string `json:"startedAt,omitempty"`
+	FinishedAt     string `json:"finishedAt,omitempty"`
 }
 
 type Run struct {
-	Prototype    *Prototype        `json:"prototype,omitempty"`
-	Models       map[string]string `json:"models,omitempty"`
-	LockedModels map[string]string `json:"lockedModels,omitempty"`
-	ParentRunID  string            `json:"parentRunId,omitempty"`
-	Continuation string            `json:"continuation,omitempty"`
-	StopReason   string            `json:"stopReason,omitempty"`
-	MaxRevisions int               `json:"maxRevisions"`
-	Acceptance   string            `json:"acceptance"`
-	Quality      string            `json:"quality"`
-	ID           string            `json:"id"`
-	ProjectID    string            `json:"projectId"`
-	Mode         string            `json:"mode"`
-	Kind         string            `json:"kind"`
-	Status       string            `json:"status"`
-	Brief        string            `json:"brief"`
-	Title        string            `json:"title"`
-	Tasks        []Task            `json:"tasks"`
-	Sessions     map[string]string `json:"sessions"`
-	Materials    []Material        `json:"materials"`
-	Document     string            `json:"document"`
-	Error        string            `json:"error"`
-	CreatedAt    string            `json:"createdAt"`
-	UpdatedAt    string            `json:"updatedAt"`
+	AvailabilityPolicy string                `json:"availabilityPolicy,omitempty"`
+	Unavailable        map[string]AgentIssue `json:"unavailable,omitempty"`
+	NeedsReview        bool                  `json:"needsReview,omitempty"`
+	Audits             []IndependentReview   `json:"audits,omitempty"`
+	ActiveAuditID      string                `json:"activeAuditId,omitempty"`
+	AuditReturnStatus  string                `json:"auditReturnStatus,omitempty"`
+	Prototype          *Prototype            `json:"prototype,omitempty"`
+	Models             map[string]string     `json:"models,omitempty"`
+	LockedModels       map[string]string     `json:"lockedModels,omitempty"`
+	ParentRunID        string                `json:"parentRunId,omitempty"`
+	Continuation       string                `json:"continuation,omitempty"`
+	StopReason         string                `json:"stopReason,omitempty"`
+	MaxRevisions       int                   `json:"maxRevisions"`
+	Acceptance         string                `json:"acceptance"`
+	Quality            string                `json:"quality"`
+	ID                 string                `json:"id"`
+	ProjectID          string                `json:"projectId"`
+	Mode               string                `json:"mode"`
+	Kind               string                `json:"kind"`
+	Status             string                `json:"status"`
+	Brief              string                `json:"brief"`
+	Title              string                `json:"title"`
+	Tasks              []Task                `json:"tasks"`
+	Sessions           map[string]string     `json:"sessions"`
+	Materials          []Material            `json:"materials"`
+	Document           string                `json:"document"`
+	Error              string                `json:"error"`
+	CreatedAt          string                `json:"createdAt"`
+	UpdatedAt          string                `json:"updatedAt"`
 }
 
 type Event struct {

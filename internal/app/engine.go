@@ -12,17 +12,18 @@ import (
 )
 
 type Engine struct {
-	Store   *Store
-	Runner  AgentRunner
-	mu      sync.Mutex
-	active  map[string]context.CancelFunc
-	wg      sync.WaitGroup
-	preview *http.Server
-	closing bool
+	Store      *Store
+	Runner     AgentRunner
+	mu         sync.Mutex
+	active     map[string]context.CancelFunc
+	wg         sync.WaitGroup
+	agentSlots map[string]chan struct{}
+	preview    *http.Server
+	closing    bool
 }
 
 func NewEngine(s *Store, runner AgentRunner) *Engine {
-	return &Engine{Store: s, Runner: runner, active: map[string]context.CancelFunc{}}
+	return &Engine{Store: s, Runner: runner, active: map[string]context.CancelFunc{}, agentSlots: map[string]chan struct{}{"codex": make(chan struct{}, 1), "claude": make(chan struct{}, 1)}}
 }
 func (e *Engine) Close() {
 	e.mu.Lock()
@@ -64,6 +65,12 @@ func (e *Engine) Create(project, mode, brief string, maxRevisions int, acceptanc
 	return e.createLocked(project, mode, brief, maxRevisions, acceptance, chosen, nil, "")
 }
 
+func (e *Engine) CreateConfigured(project, mode, brief string, maxRevisions int, acceptance string, models map[string]string, availability AvailabilityOptions) (Run, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.createLocked(project, mode, brief, maxRevisions, acceptance, models, nil, "", availability)
+}
+
 func (e *Engine) Continue(id string, maxRevisions int, instruction string) (Run, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -90,7 +97,7 @@ func (e *Engine) Continue(id string, maxRevisions int, instruction string) (Run,
 	return e.createLocked(parent.ProjectID, parent.Mode, parent.Brief, maxRevisions, parent.Acceptance, chosen, &parent, strings.TrimSpace(instruction))
 }
 
-func (e *Engine) createLocked(project, mode, brief string, maxRevisions int, acceptance string, models map[string]string, parent *Run, instruction string) (Run, error) {
+func (e *Engine) createLocked(project, mode, brief string, maxRevisions int, acceptance string, models map[string]string, parent *Run, instruction string, options ...AvailabilityOptions) (Run, error) {
 	if e.closing {
 		return Run{}, errors.New("Сервер завершает работу")
 	}
@@ -141,6 +148,24 @@ func (e *Engine) createLocked(project, mode, brief string, maxRevisions int, acc
 		return Run{}, err
 	}
 	r := Run{ID: ID(), ProjectID: project, Mode: mode, Kind: "design", Status: "paused", Title: p.Title, Brief: brief, Tasks: plan(), Sessions: map[string]string{}, Materials: materials, CreatedAt: now(), UpdatedAt: now()}
+	a := AvailabilityOptions{}
+	if parent != nil {
+		a.Policy = parent.AvailabilityPolicy
+	}
+	if len(options) > 0 {
+		a = options[0]
+	}
+	a, err = normalizeAvailability(a)
+	if err != nil {
+		return Run{}, err
+	}
+	setInitialAvailability(&r, a)
+	if parent != nil && len(options) == 0 {
+		for k, v := range parent.Unavailable {
+			r.Unavailable[k] = v
+		}
+		r.NeedsReview = parent.NeedsReview
+	}
 	r.Models = chosen
 	r.LockedModels = map[string]string{}
 	if parent != nil {
@@ -255,13 +280,19 @@ func (e *Engine) Finish(id string) (Run, error) {
 	if r.Status != "paused" && r.Status != "failed" && r.Status != "awaiting_plan" {
 		return r, errors.New("Цикл нельзя завершить в этом состоянии")
 	}
-	return e.Store.UpdateRun(id, func(r *Run) { r.Status = "stopped"; r.Error = "" })
+	return e.Store.UpdateRun(id, func(r *Run) { r.Status = "stopped"; r.Error = ""; r.ActiveAuditID = ""; r.AuditReturnStatus = "" })
 }
 
 func (e *Engine) execute(ctx context.Context, id string) {
-	if r, err := e.Store.Run(id); err == nil && r.Prototype != nil {
-		e.executePrototype(ctx, r)
-		return
+	if r, err := e.Store.Run(id); err == nil {
+		if r.ActiveAuditID != "" {
+			e.executeAudit(ctx, r)
+			return
+		}
+		if r.Prototype != nil {
+			e.executePrototype(ctx, r)
+			return
+		}
 	}
 	var failure error
 	for phase := 0; phase < 4+2*MaxRevisions; phase++ {
@@ -273,7 +304,7 @@ func (e *Engine) execute(ctx context.Context, id string) {
 			failure = err
 			break
 		}
-		if r.Quality == "ready" || r.Quality == "limit" || r.Quality == "stalled" {
+		if r.Quality == "self_checked" || r.Quality == "ready" || r.Quality == "limit" || r.Quality == "stalled" {
 			break
 		}
 		var wg sync.WaitGroup
@@ -310,6 +341,10 @@ func (e *Engine) execute(ctx context.Context, id string) {
 				}
 				if reviewReady(verification) {
 					r.Quality = "ready"
+					if r.NeedsReview {
+						r.Quality = "self_checked"
+						r.StopReason = "Самопроверка завершена. Ожидается независимое ревью второго агента."
+					}
 					return
 				}
 				if reason := stagnationReason(*r); reason != "" {
@@ -363,7 +398,7 @@ func reviewReady(text string) bool {
 	return len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "[TANDEM_READY]"
 }
 
-func (e *Engine) perform(ctx context.Context, r Run, task Task) error {
+func (e *Engine) performOnce(ctx context.Context, r Run, task Task) error {
 	_, err := e.Store.UpdateRun(r.ID, func(r *Run) {
 		for i := range r.Tasks {
 			if r.Tasks[i].ID == task.ID {
@@ -407,13 +442,14 @@ func (e *Engine) perform(ctx context.Context, r Run, task Task) error {
 		result.Text = demoAnswer(r, task)
 	} else {
 		prompt, err := e.prompt(r, task)
+		prompt += availabilityPrompt(r, task)
 		if err != nil {
 			return err
 		}
 		callCtx, cancel := context.WithTimeout(ctx, 20*time.Minute)
 		defer cancel()
 		session := r.Sessions[task.Agent]
-		if r.Prototype != nil {
+		if r.Prototype != nil || len(r.Unavailable) > 0 || task.Agent != requestedAgent(task) || task.Stage == "independent_review" {
 			session = ""
 		}
 		result, err = e.Runner.Run(callCtx, AgentInput{Agent: task.Agent, Directory: filepath.Join(e.Store.Dir, "runs", r.ID, task.Agent), Session: session, Prompt: prompt, Stage: task.Stage, Model: runModel(r, task.Agent)}, emit)
@@ -443,7 +479,7 @@ func (e *Engine) perform(ctx context.Context, r Run, task Task) error {
 			return fmt.Errorf("%s сменил модель с %s на %s. Ответ не принят; создайте новый цикл с нужной моделью", task.Agent, expected, result.Model)
 		}
 	}
-	if r.Prototype != nil {
+	if r.Prototype != nil || task.Stage == "independent_review" {
 		if err := validatePrototypeAnswer(r, task, result.Text); err != nil {
 			return err
 		}
@@ -452,6 +488,9 @@ func (e *Engine) perform(ctx context.Context, r Run, task Task) error {
 }
 
 func (e *Engine) prompt(r Run, task Task) (string, error) {
+	if task.Stage == "independent_review" {
+		return e.auditPrompt(r, task)
+	}
 	if r.Prototype != nil {
 		return e.prototypePrompt(r, task)
 	}
@@ -470,7 +509,13 @@ func (e *Engine) prompt(r Run, task Task) (string, error) {
 		fmt.Fprintf(&b, "\nДокумент для продолжения доработки:\n%s\n", parent.Document)
 		for i := len(parent.Tasks) - 1; i >= 0; i-- {
 			t := parent.Tasks[i]
-			if t.Status == "done" && (t.Stage == "verify" || t.Stage == "review") {
+			if t.Stage == "independent_review" {
+				latest, _ := auditArtifact(parent, "", "")
+				if t.ArtifactTaskID != latest.ID {
+					continue
+				}
+			}
+			if t.Status == "done" && (t.Stage == "verify" || t.Stage == "review" || t.Stage == "independent_review") {
 				fmt.Fprintf(&b, "\nПоследние замечания проверяющего:\n%s\n", t.Output)
 				break
 			}
@@ -484,7 +529,7 @@ func (e *Engine) prompt(r Run, task Task) (string, error) {
 				return "", err
 			}
 			for _, m := range msgs {
-				if m.RunID == ancestor.ID && m.Actor == "user" && m.Stage == "steering" && (m.Target == "all" || m.Target == task.Agent) {
+				if m.RunID == ancestor.ID && m.Actor == "user" && m.Stage == "steering" && (m.Target == "all" || m.Target == task.Agent || m.Target == requestedAgent(task)) {
 					fmt.Fprintf(&b, "\nУточнение пользователя:\n%s\n", m.Text)
 				}
 			}
@@ -519,7 +564,7 @@ func (e *Engine) prompt(r Run, task Task) (string, error) {
 		return "", err
 	}
 	for _, m := range messages {
-		if m.RunID == r.ID && m.Actor == "user" && m.Stage != "brief" && (m.Target == "all" || m.Target == task.Agent) {
+		if m.RunID == r.ID && m.Actor == "user" && m.Stage != "brief" && (m.Target == "all" || m.Target == task.Agent || m.Target == requestedAgent(task)) {
 			fmt.Fprintf(&b, "\nУточнение пользователя для %s:\n%s\n", m.Target, m.Text)
 		}
 	}
@@ -540,6 +585,8 @@ func (e *Engine) prompt(r Run, task Task) (string, error) {
 
 func stageLabel(stage string) string {
 	switch stage {
+	case "independent_review":
+		return "Независимое ревью сохранённой версии"
 	case "prototype_plan":
 		return "Предложение плана прототипа"
 	case "prototype_plan_review":

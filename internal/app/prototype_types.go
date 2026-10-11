@@ -24,16 +24,17 @@ type Prototype struct {
 	CurrentCommit     string          `json:"currentCommit,omitempty"`
 }
 type PrototypeConfig struct {
-	RevisionID      string `json:"revisionId"`
-	Platform        string `json:"platform"`
-	ProductPlatform string `json:"productPlatform"`
-	Hypothesis      string `json:"hypothesis"`
-	SourceRepo      string `json:"sourceRepo"`
-	ParentDirectory string `json:"parentDirectory"`
-	Author          string `json:"author"`
-	MaxRounds       int    `json:"maxRounds"`
-	MaxMinutes      int    `json:"maxMinutes"`
-	MaxFailures     int    `json:"maxFailures"`
+	Availability    AvailabilityOptions `json:"availability"`
+	RevisionID      string              `json:"revisionId"`
+	Platform        string              `json:"platform"`
+	ProductPlatform string              `json:"productPlatform"`
+	Hypothesis      string              `json:"hypothesis"`
+	SourceRepo      string              `json:"sourceRepo"`
+	ParentDirectory string              `json:"parentDirectory"`
+	Author          string              `json:"author"`
+	MaxRounds       int                 `json:"maxRounds"`
+	MaxMinutes      int                 `json:"maxMinutes"`
+	MaxFailures     int                 `json:"maxFailures"`
 }
 type PrototypePlan struct {
 	PreviewDirectory string         `json:"previewDirectory,omitempty"`
@@ -94,6 +95,9 @@ type CheckResult struct {
 	FinishedAt string   `json:"finishedAt,omitempty"`
 }
 type Build struct {
+	Author         string        `json:"author,omitempty"`
+	ReviewAgent    string        `json:"reviewAgent,omitempty"`
+	SelfReview     bool          `json:"selfReview,omitempty"`
 	PreviewReady   bool          `json:"previewReady"`
 	PreviewError   string        `json:"previewError,omitempty"`
 	ID             string        `json:"id"`

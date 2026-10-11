@@ -120,6 +120,17 @@ func (e *Engine) CreatePrototype(project string, c PrototypeConfig) (Run, error)
 		return Run{}, err
 	}
 	r := Run{ID: ID(), ProjectID: project, Kind: "prototype", Mode: "live", Status: "paused", Title: parent.Title, Brief: c.Hypothesis, CreatedAt: now(), UpdatedAt: now(), Models: parent.Models, LockedModels: parent.LockedModels, Sessions: map[string]string{}, Materials: parent.Materials, MaxRevisions: c.MaxRounds, Quality: "pending"}
+	if c.Availability.Policy == "" {
+		c.Availability.Policy = parent.AvailabilityPolicy
+	}
+	availability, err := normalizeAvailability(c.Availability)
+	if err != nil {
+		return Run{}, err
+	}
+	setInitialAvailability(&r, availability)
+	for k, v := range parent.Unavailable {
+		r.Unavailable[k] = v
+	}
 	r.Prototype = &Prototype{SourceCommit: sourceCommit, RepositoryContext: sourceContext, Source: source, Config: c, Workspace: filepath.Join(c.ParentDirectory, "tandem-"+r.ID, "workspace"), Builds: []Build{}, Decisions: []Decision{{CreatedAt: now(), Actor: "user", Text: fmt.Sprintf("Выбрана редакция ТЗ №%d, SHA256 %s. Гипотеза: %s", source.Number, source.SHA256, c.Hypothesis)}}, Tools: toolChecks(nil), RoundLimit: c.MaxRounds}
 	r.Tasks = []Task{prototypeTask(c.Author, "prototype_plan", 0), prototypeTask(otherAgent(c.Author), "prototype_plan_review", 1), prototypeTask(c.Author, "prototype_plan_final", 2)}
 	if err = e.Store.Snapshot(r); err != nil {
@@ -201,7 +212,7 @@ func validatePrototypeAnswer(r Run, t Task, text string) error {
 			return err
 		}
 		return validateProposal(p)
-	case "prototype_review":
+	case "prototype_review", "independent_review":
 		var p CodeReview
 		if err := parseObject(text, &p); err != nil {
 			return err
@@ -338,7 +349,7 @@ func (e *Engine) executePrototype(parent context.Context, initial Run) {
 			return
 		}
 		p = r.Prototype
-		if r.Quality == "ready" || r.Quality == "limit" || r.Quality == "stalled" {
+		if r.Quality == "self_checked" || r.Quality == "ready" || r.Quality == "limit" || r.Quality == "stalled" {
 			return
 		}
 		// Process every durable task in order. Post-processing is idempotent so a
@@ -458,6 +469,8 @@ func (e *Engine) executePrototype(parent context.Context, initial Run) {
 					p := r.Prototype
 					b := &p.Builds[idx]
 					b.Review = &review
+					b.ReviewAgent = t.Agent
+					b.SelfReview = t.SelfReview
 					okay := checksPassed(*b, *p.Plan)
 					if okay {
 						p.FailureCount = 0
@@ -469,6 +482,10 @@ func (e *Engine) executePrototype(parent context.Context, initial Run) {
 					case okay && review.Ready && len(review.Issues) == 0:
 						r.Quality = "ready"
 						r.StopReason = "Ревью завершено, автоматические проверки прошли. Ожидается ваша проверка механики и ручная приёмка."
+						if t.SelfReview {
+							r.Quality = "self_checked"
+							r.StopReason = "Автоматические проверки и самопроверка завершены. Ожидается независимое ревью и ваша проверка механики."
+						}
 					case p.FailureCount >= p.Config.MaxFailures:
 						r.Quality = "stalled"
 						r.StopReason = "Повторные неудачные проверки достигли заданного предела. Нужен разбор журнала."
@@ -541,7 +558,7 @@ func (e *Engine) prototypePrompt(r Run, t Task) (string, error) {
 		return "", err
 	}
 	for _, m := range messages {
-		if m.RunID == r.ID && m.Actor == "user" && (m.Target == "all" || m.Target == t.Agent) {
+		if m.RunID == r.ID && m.Actor == "user" && (m.Target == "all" || m.Target == t.Agent || m.Target == requestedAgent(t)) {
 			fmt.Fprintf(&b, "\nУточнение пользователя:\n%s\n", m.Text)
 		}
 	}
@@ -574,6 +591,11 @@ func (e *Engine) prototypePrompt(r Run, t Task) (string, error) {
 		}
 		latest, _ := json.Marshal(selected)
 		fmt.Fprintf(&b, "\nВыбранная сборка и фактические проверки:\n%s\n", latest)
+	}
+	for _, a := range r.Audits {
+		if a.Review != nil {
+			fmt.Fprintf(&b, "\nНезависимая рецензия %s для версии %s / сборки %s:\n%s\n", a.Agent, a.ArtifactTaskID, a.BuildID, a.Output)
+		}
 	}
 	switch t.Stage {
 	case "prototype_plan":

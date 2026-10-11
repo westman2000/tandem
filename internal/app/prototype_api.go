@@ -55,7 +55,21 @@ func (s *Server) developmentAPI(w http.ResponseWriter, r *http.Request, parts []
 				problem(w, 400, err)
 				return true
 			}
-			if !s.checkAgents(w, r.Context()) {
+			source, err := s.Store.Approval(project, c.RevisionID)
+			if err != nil {
+				problem(w, 409, err)
+				return true
+			}
+			parent, err := s.Store.Run(source.RunID)
+			if err != nil {
+				problem(w, 409, err)
+				return true
+			}
+			if c.Availability.Policy == "" {
+				c.Availability.Policy = parent.AvailabilityPolicy
+			}
+			c.Availability.Issues = parent.Unavailable
+			if !s.checkAvailability(w, r.Context(), &c.Availability) {
 				return true
 			}
 			run, err := s.Engine.CreatePrototype(project, c)
@@ -145,7 +159,7 @@ func (s *Server) developmentAPI(w http.ResponseWriter, r *http.Request, parts []
 				return true
 			}
 			if parts[3] == "approve" || parts[3] == "feedback" || parts[3] == "revise-plan" {
-				if !s.checkAgents(w, r.Context()) {
+				if !s.checkRunAgents(w, r.Context(), run) {
 					return true
 				}
 			}

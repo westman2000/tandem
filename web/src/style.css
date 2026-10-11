@@ -2381,3 +2381,18 @@ select {
 .check-result summary { display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .muted { color:var(--muted); font-size:13px; }
 @media(max-width:760px) { .form-grid,.limits-grid { grid-template-columns:1fr; gap:0; }.prototype-panel { padding:18px; }.prototype-header { display:block; }.prototype-steps { grid-template-columns:repeat(2,1fr); }.version-toolbar { align-items:stretch; flex-direction:column; } }
+
+/* Availability and independent review */
+.availability-fields { margin: 20px 0; padding: 18px; border: 1px solid var(--line, #deddd5); border-radius: 12px; }
+.availability-fields h3 { margin-top: 0; }
+.availability-panel { margin: 0 0 20px; padding: 18px; background: #faf9f4; border: 1px solid #dfdfd4; border-radius: 12px; font-size: 13px; }
+.availability-panel summary { cursor: pointer; font-weight: 600; }
+.availability-panel label { display: grid; gap: 8px; margin: 16px 0; }
+.availability-agent { display: flex; align-items: center; justify-content: space-between; gap: 14px; border-top: 1px solid #e4e2d8; padding: 12px 0; }
+.availability-agent p { margin: 4px 0; line-height: 1.5; }
+.availability-agent button { flex-shrink: 0; }
+.review-debt { padding: 10px 12px; background: #fff2d5; border-radius: 8px; margin-top: 0; line-height: 1.6; }
+.audit-request { margin-top: 16px; }
+.audit-history article { margin-top: 14px; padding-top: 12px; border-top: 1px solid #dfdfd4; }
+.audit-history small { display: block; margin-top: 6px; color: #73766e; }
+@media(max-width: 640px) { .availability-agent { align-items: flex-start; flex-direction: column; } }

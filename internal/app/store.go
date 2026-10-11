@@ -297,8 +297,18 @@ func (s *Store) CommitTask(runID, taskID, answer string, models ...string) error
 	r.UpdatedAt = now()
 	if task.Stage == "draft" || task.Stage == "revision" {
 		r.Document = answer
+		r.NeedsReview = true
 	}
-	m := Message{ID: ID(), ProjectID: r.ProjectID, RunID: r.ID, Actor: task.Agent, Model: task.Model, Target: "all", Text: answer, Stage: task.Stage, Demo: r.Mode == "demo", CreatedAt: now()}
+	if task.Stage == "prototype_plan_final" && len(r.Unavailable) > 0 {
+		r.NeedsReview = true
+	}
+	if task.Stage == "prototype_code" {
+		r.NeedsReview = true
+	}
+	if reviewStage(task.Stage) {
+		r.NeedsReview = task.SelfReview
+	}
+	m := Message{RequestedAgent: task.RequestedAgent, SelfReview: task.SelfReview, ID: ID(), ProjectID: r.ProjectID, RunID: r.ID, Actor: task.Agent, Model: task.Model, Target: "all", Text: answer, Stage: task.Stage, Demo: r.Mode == "demo", CreatedAt: now()}
 	rb, _ := json.Marshal(r)
 	mb, _ := json.Marshal(m)
 	tx, err := s.db.Begin()
