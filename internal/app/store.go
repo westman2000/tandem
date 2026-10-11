@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -45,6 +46,7 @@ func OpenStore(dir string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	_, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
 	 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, body TEXT NOT NULL);
+	 CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, body TEXT NOT NULL);
 	 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, body TEXT NOT NULL);
 	 CREATE INDEX IF NOT EXISTS runs_project ON runs(project_id);
 	 CREATE TABLE IF NOT EXISTS materials(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, body TEXT NOT NULL);
@@ -232,8 +234,13 @@ func (s *Store) Event(run, agent, kind, text string) error {
 	_, err := s.db.Exec("INSERT INTO events(run_id,agent,kind,text,created_at) VALUES(?,?,?,?,?)", run, agent, kind, text, now())
 	return err
 }
-func (s *Store) Events(run string) ([]Event, error) {
-	rows, err := s.db.Query("SELECT id,run_id,agent,kind,text,created_at FROM events WHERE run_id=? ORDER BY id DESC LIMIT 500", run)
+func (s *Store) Events(run string) ([]Event, error) { return s.events(run, false) }
+func (s *Store) events(run string, all bool) ([]Event, error) {
+	query := "SELECT id,run_id,agent,kind,text,created_at FROM events WHERE run_id=? ORDER BY id DESC"
+	if !all {
+		query += " LIMIT 500"
+	}
+	rows, err := s.db.Query(query, run)
 	if err != nil {
 		return nil, err
 	}
@@ -332,6 +339,28 @@ func (s *Store) Recover() error {
 		if r.Status == "running" || r.Status == "pausing" {
 			_, err = s.UpdateRun(r.ID, func(r *Run) {
 				r.Status = "paused"
+				if r.Prototype != nil {
+					if at, err := time.Parse(time.RFC3339Nano, r.Prototype.ActiveSince); err == nil {
+						elapsed := time.Since(at).Seconds()
+						if elapsed > 5 {
+							elapsed = 5
+						}
+						if elapsed > 0 {
+							r.Prototype.UsedSeconds += elapsed
+						}
+						r.Prototype.ActiveSince = ""
+					}
+					for i := range r.Prototype.Builds {
+						for j := range r.Prototype.Builds[i].Checks {
+							c := &r.Prototype.Builds[i].Checks[j]
+							if c.Status == "running" {
+								c.Status = "interrupted"
+								c.FinishedAt = now()
+								c.Output += "\nСервер перезапущен до завершения проверки"
+							}
+						}
+					}
+				}
 				r.Error = "Работа прервана перезапуском. Можно продолжить с последнего сохранённого этапа."
 				for i := range r.Tasks {
 					if r.Tasks[i].Status == "running" {

@@ -49,6 +49,7 @@ type Task struct {
 }
 
 type Run struct {
+	Prototype    *Prototype        `json:"prototype,omitempty"`
 	Models       map[string]string `json:"models,omitempty"`
 	LockedModels map[string]string `json:"lockedModels,omitempty"`
 	ParentRunID  string            `json:"parentRunId,omitempty"`

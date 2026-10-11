@@ -108,13 +108,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/"), "/")
 	parts := strings.Split(path, "/")
+	if s.developmentAPI(w, r, parts) {
+		return
+	}
 	if path == "bootstrap" && r.Method == "GET" {
 		p, err := s.Store.Projects()
 		if err != nil {
 			problem(w, 500, err)
 			return
 		}
-		respond(w, 200, map[string]any{"token": s.Token, "projects": p, "version": "0.2.0", "dataDir": s.Store.Dir})
+		respond(w, 200, map[string]any{"token": s.Token, "projects": p, "version": "0.3.0", "dataDir": s.Store.Dir})
 		return
 	}
 	if path == "models" && r.Method == "GET" {
@@ -168,7 +171,12 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 				problem(w, 500, err)
 				return
 			}
-			respond(w, 200, map[string]any{"project": p, "messages": messages, "materials": materials, "runs": runs})
+			revisions, err := s.Store.Revisions(p.ID)
+			if err != nil {
+				problem(w, 500, err)
+				return
+			}
+			respond(w, 200, map[string]any{"project": p, "messages": messages, "materials": materials, "runs": runs, "revisions": revisions})
 			return
 		}
 		if len(parts) == 3 && parts[2] == "runs" && r.Method == "POST" {

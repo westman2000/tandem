@@ -10,5 +10,6 @@
     "noEmit": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["web/src"]
+  "include": ["web/src"],
+  "exclude": ["web/src/*.test.ts"]
 }
