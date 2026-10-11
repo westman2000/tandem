@@ -121,7 +121,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			problem(w, 500, err)
 			return
 		}
-		respond(w, 200, map[string]any{"token": s.Token, "projects": p, "version": "0.5.0", "dataDir": s.Store.Dir})
+		respond(w, 200, map[string]any{"token": s.Token, "projects": p, "version": "0.5.1", "dataDir": s.Store.Dir})
 		return
 	}
 	if path == "models" && r.Method == "GET" {
@@ -143,6 +143,21 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		} else {
 			respond(w, 200, AgentStatuses(r.Context()))
 		}
+		return
+	}
+	if path == "agents/claude/check" && r.Method == "POST" {
+		var in struct {
+			Model string `json:"model"`
+		}
+		if err := decode(w, r, &in); err != nil || !validModel(in.Model) {
+			problem(w, 400, errors.New("Укажите корректную модель для проверки"))
+			return
+		}
+		if err := s.Engine.CheckClaude(r.Context(), in.Model); err != nil {
+			problem(w, 409, err)
+			return
+		}
+		respond(w, 200, s.Engine.Health.Statuses())
 		return
 	}
 	if path == "projects" && r.Method == "POST" {

@@ -2419,3 +2419,5 @@ select {
 .draft-error { color: #a74335; }
 .health-alerts { border-left: 3px solid #b18035; background: #fbf4e7; padding: 4px 16px; margin-bottom: 20px; border-radius: 0 8px 8px 0; }
 .health-alerts p { font-size: 13px; line-height: 1.5; margin: 9px 0; }
+
+.access-check,.access-result{display:grid;gap:8px;margin-top:10px}.access-check .button{width:100%;white-space:normal}.access-result p{margin:0}

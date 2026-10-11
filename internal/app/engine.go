@@ -23,6 +23,7 @@ type Engine struct {
 	agentSlots  map[string]chan struct{}
 	preview     *http.Server
 	closing     bool
+	checkCancel context.CancelFunc
 }
 
 func NewEngine(s *Store, runner AgentRunner) *Engine {
@@ -31,6 +32,9 @@ func NewEngine(s *Store, runner AgentRunner) *Engine {
 func (e *Engine) Close() {
 	e.mu.Lock()
 	e.closing = true
+	if e.checkCancel != nil {
+		e.checkCancel()
+	}
 	if e.preview != nil {
 		_ = e.preview.Close()
 	}

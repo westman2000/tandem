@@ -28,6 +28,7 @@ type QuotaReading struct {
 	Scope     string        `json:"scope,omitempty"`
 }
 type AgentHealth struct {
+	AccessCheck   *AccessCheck  `json:"accessCheck,omitempty"`
 	AccountKey    string        `json:"-"`
 	QuotaMode     string        `json:"quotaMode"`
 	CheckedAt     string        `json:"checkedAt,omitempty"`
@@ -62,6 +63,9 @@ func NewHealthMonitor(s *Store) *HealthMonitor {
 			var v savedHealth
 			if rows.Scan(&b) == nil && json.Unmarshal([]byte(b), &v) == nil {
 				v.Status.Health = nil
+				if c := v.Health.AccessCheck; c != nil && c.State == "checking" {
+					c.State, c.Detail = "interrupted", "Проверка прервалась при остановке Tandem. Результат не подтверждён; повторите проверку явно."
+				}
 				h.records[v.Status.Agent] = v
 			}
 		}

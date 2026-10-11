@@ -126,6 +126,9 @@ func commandArgs(in AgentInput) []string {
 		if in.Model != "" {
 			args = append(args, "--model", in.Model)
 		}
+		if in.Stage == "access_check" {
+			args = append(args, "--max-turns", "1", "--no-session-persistence", "--system-prompt", "Reply with OK only.")
+		}
 		if in.Session != "" {
 			args = append(args, "--resume", in.Session)
 		}
