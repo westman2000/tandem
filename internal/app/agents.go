@@ -72,7 +72,14 @@ func agentStatus(ctx context.Context, agent string) AgentStatus {
 	run := func(args ...string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, bin, args...)
 		cmd.Env = subscriptionEnv(os.Environ())
-		return cmd.CombinedOutput()
+		cmd.WaitDelay = 2 * time.Second
+		isolateProcess(cmd)
+		var output cappedBuffer
+		output.limit = 64 << 10
+		cmd.Stdout = &output
+		cmd.Stderr = &output
+		err := cmd.Run()
+		return output.Bytes(), err
 	}
 	v, _ := run("--version")
 	s.Version = strings.TrimSpace(string(v))
@@ -86,15 +93,18 @@ func agentStatus(ctx context.Context, agent string) AgentStatus {
 			LoggedIn         bool   `json:"loggedIn"`
 			AuthMethod       string `json:"authMethod"`
 			SubscriptionType string `json:"subscriptionType"`
+			Email            string `json:"email"`
+			OrgID            string `json:"orgId"`
 		}
 		if e == nil && json.Unmarshal(b, &a) == nil {
+			s.AccountKey = textHash(a.AuthMethod + ":" + a.Email + ":" + a.OrgID)
 			s.Authenticated = a.LoggedIn
 			s.Subscription = a.LoggedIn && (strings.EqualFold(a.AuthMethod, "claude.ai") || strings.EqualFold(a.AuthMethod, "oauth") || a.SubscriptionType != "")
 		}
 	}
 	switch {
 	case s.Subscription:
-		s.Detail = "Вход по подписке подтверждён; остаток лимита не проверяется"
+		s.Detail = "Вход по подписке подтверждён"
 	case s.Authenticated:
 		s.Detail = "Вход найден, но подписка не подтверждена. Войдите через официальный CLI"
 	default:
@@ -157,12 +167,21 @@ func (s *streamState) parse(agent string, line []byte, emit func(string, string)
 		return v
 	}
 	typ := str(e, "type")
+	if q := parseClaudeQuota(line); agent == "claude" && q != nil {
+		payload, _ := json.Marshal(q)
+		emit("quota", string(payload))
+		if q.Allowed != nil && !*q.Allowed && q.Scope != "overage" && !s.completed {
+			s.unavailable = &AgentUnavailableError{Agent: agent, Kind: "limit", Detail: "Claude Code сообщил об исчерпании лимита подписки"}
+		}
+	}
 	var bad bool
 	_ = json.Unmarshal(e["is_error"], &bad)
 	errorPayload := typ == "turn.failed" || typ == "error" || typ == "result" && bad || typ == "assistant" && str(e, "error") != ""
 	if errorPayload {
 		if problem := unavailableDiagnostic(agent, string(line)); problem != nil {
-			s.unavailable = problem
+			if s.unavailable == nil || s.unavailable.Kind != "limit" || problem.Kind != "throttle" {
+				s.unavailable = problem
+			}
 		}
 	}
 	if typ == "turn.completed" || typ == "result" && !bad {
@@ -300,7 +319,7 @@ func (CLIRunner) Run(ctx context.Context, in AgentInput, emit func(string, strin
 		return result, fmt.Errorf("%s завершился с ошибкой (%v). Проверьте вход в CLI, сеть и лимит подписки", in.Agent, err)
 	}
 	if !state.completed {
-		return result, errors.New("Поток CLI оборвался до подтверждения завершения ответа")
+		return result, &AgentUnavailableError{Agent: in.Agent, Kind: "network", Detail: "Поток CLI оборвался до подтверждения завершения ответа"}
 	}
 	if result.Text == "" {
 		return result, errors.New("CLI завершился без текстового ответа")

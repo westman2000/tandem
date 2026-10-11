@@ -81,7 +81,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			problem(w, 403, errors.New("Обновите страницу и повторите действие"))
 			return
 		}
-		s.api(w, r)
+		if r.Method == "GET" {
+			s.api(w, r)
+		} else {
+			s.mutate(w, r)
+		}
 		return
 	}
 	if r.Method != "GET" && r.Method != "HEAD" {
@@ -117,7 +121,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			problem(w, 500, err)
 			return
 		}
-		respond(w, 200, map[string]any{"token": s.Token, "projects": p, "version": "0.4.0", "dataDir": s.Store.Dir})
+		respond(w, 200, map[string]any{"token": s.Token, "projects": p, "version": "0.5.0", "dataDir": s.Store.Dir})
 		return
 	}
 	if path == "models" && r.Method == "GET" {
@@ -125,7 +129,20 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if path == "agents" && r.Method == "GET" {
-		respond(w, 200, AgentStatuses(r.Context()))
+		if s.Engine.Health != nil {
+			respond(w, 200, s.Engine.Health.Statuses())
+		} else {
+			respond(w, 200, AgentStatuses(r.Context()))
+		}
+		return
+	}
+	if path == "agents/refresh" && r.Method == "POST" {
+		if s.Engine.Health != nil {
+			s.Engine.Health.Refresh(r.Context(), true)
+			respond(w, 200, s.Engine.Health.Statuses())
+		} else {
+			respond(w, 200, AgentStatuses(r.Context()))
+		}
 		return
 	}
 	if path == "projects" && r.Method == "POST" {
@@ -411,7 +428,25 @@ func availableSubscriptions(a AvailabilityOptions, statuses []AgentStatus) (map[
 	return issues, nil
 }
 func (s *Server) checkAvailability(w http.ResponseWriter, ctx context.Context, a *AvailabilityOptions) bool {
-	issues, err := availableSubscriptions(*a, AgentStatuses(ctx))
+	var statuses []AgentStatus
+	if s.Engine.Health != nil {
+		s.Engine.Health.Refresh(ctx, false)
+		statuses = s.Engine.Health.Statuses()
+		for _, v := range statuses {
+			if issue := s.Engine.Health.Blocking(v.Agent, ""); issue != nil {
+				if a.Issues == nil {
+					a.Issues = map[string]AgentIssue{}
+				}
+				if old, ok := a.Issues[v.Agent]; !ok || old.Kind != "manual" {
+					a.Issues[v.Agent] = *issue
+				}
+			}
+		}
+	}
+	if s.Engine.Health == nil {
+		statuses = AgentStatuses(ctx)
+	}
+	issues, err := availableSubscriptions(*a, statuses)
 	a.Issues = issues
 	if err != nil {
 		problem(w, 409, err)
@@ -420,6 +455,10 @@ func (s *Server) checkAvailability(w http.ResponseWriter, ctx context.Context, a
 	return true
 }
 func (s *Server) checkRunAgents(w http.ResponseWriter, ctx context.Context, r Run) bool {
+	if s.Engine.Health != nil {
+		s.Engine.Health.Refresh(ctx, false)
+		r = s.Engine.reconcileHealth(r)
+	}
 	// An independent audit needs only its reviewer, even under the wait policy.
 	if r.ActiveAuditID != "" {
 		for _, audit := range r.Audits {
@@ -438,6 +477,12 @@ func (s *Server) checkRunAgents(w http.ResponseWriter, ctx context.Context, r Ru
 		}
 		problem(w, 409, errors.New("Не найдена задача независимого ревью"))
 		return false
+	}
+	r = s.Engine.reconcileHealth(r)
+	for agent, issue := range r.Unavailable {
+		if transient(issue.Kind) {
+			delete(r.Unavailable, agent)
+		}
 	}
 	a := AvailabilityOptions{Policy: r.AvailabilityPolicy, Issues: r.Unavailable}
 	okay := s.checkAvailability(w, ctx, &a)
@@ -472,6 +517,11 @@ func Serve(ctx context.Context, address, data string, ui fs.FS) error {
 		return err
 	}
 	engine := NewEngine(store, CLIRunner{})
+	monitorCtx, stopMonitor := context.WithCancel(ctx)
+	engine.Health = NewHealthMonitor(store)
+	monitorDone := make(chan struct{})
+	go func() { defer close(monitorDone); engine.Health.Start(monitorCtx) }()
+	defer func() { stopMonitor(); <-monitorDone }()
 	defer engine.Close()
 	server := &http.Server{Addr: address, Handler: NewServer(store, engine, ui), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 16}
 	listener, err := net.Listen("tcp", address)

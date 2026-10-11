@@ -13,9 +13,11 @@ type AvailabilityOptions struct {
 	UnavailableAgent string                `json:"unavailableAgent,omitempty"`
 }
 type AgentIssue struct {
-	Kind   string `json:"kind"`
-	Detail string `json:"detail"`
-	Since  string `json:"since"`
+	Kind    string `json:"kind"`
+	Detail  string `json:"detail"`
+	Since   string `json:"since"`
+	Scope   string `json:"scope,omitempty"`
+	ResetAt int64  `json:"resetAt,omitempty"`
 }
 type AgentUnavailableError struct{ Agent, Kind, Detail string }
 
@@ -55,9 +57,10 @@ func unavailableDiagnostic(agent, text string) *AgentUnavailableError {
 		kind, detail string
 		patterns     []string
 	}{
-		{"limit", "Исчерпан лимит или сервис ограничил частоту запросов", []string{"rate_limit", "rate limit", "usage limit", "usage_limit", "quota exceeded", "insufficient_quota", "you've hit your limit", "you have hit your limit", "limit reached", "лимит исчерпан", "лимит использования", "too many requests", "http 429", "status 429"}},
+		{"limit", "Исчерпан лимит или сервис ограничил частоту запросов", []string{"usage limit", "usage_limit", "quota exceeded", "insufficient_quota", "you've hit your limit", "you have hit your limit", "limit reached", "лимит исчерпан", "лимит использования"}},
+		{"throttle", "Сервис временно ограничил частоту запросов", []string{"rate_limit", "rate limit", "too many requests", "http 429", "status 429"}},
 		{"auth", "Требуется восстановить вход в официальный CLI", []string{"authentication_error", "not logged in", "please log in", "please login", "login required", "token expired", "token has expired", "invalid authentication", "unauthorized", "http 401", "status 401"}},
-		{"network", "Сервис временно недоступен или нет соединения", []string{"overloaded_error", "service unavailable", "connection refused", "connection reset", "network error", "network_error", "econnreset", "econnrefused", "etimedout", "enotfound", "unable to connect", "failed to connect", "http 503", "status 503"}},
+		{"network", "Сервис временно недоступен или нет соединения", []string{"overloaded_error", "service unavailable", "connection refused", "connection reset", "network error", "network_error", "econnreset", "econnrefused", "etimedout", "enotfound", "unable to connect", "failed to connect", "http 503", "status 503", "network is unreachable", "no such host", "internet", "stream disconnected", "error sending request", "unexpected eof", "stream ended before"}},
 	}
 	for _, g := range groups {
 		for _, pattern := range g.patterns {
@@ -100,11 +103,25 @@ func authorForTask(r Run, t Task) string {
 	return ""
 }
 func (e *Engine) markUnavailable(id string, problem *AgentUnavailableError) error {
+	if e.Health != nil {
+		e.Health.Failure(problem.Agent, AgentIssue{Kind: problem.Kind, Detail: problem.Detail, Since: now()})
+	}
+	var observed *AgentIssue
+	if e.Health != nil {
+		for _, status := range e.Health.Statuses() {
+			if status.Agent == problem.Agent {
+				observed = status.Health.Issue
+			}
+		}
+	}
 	_, err := e.Store.UpdateRun(id, func(r *Run) {
 		if r.Unavailable == nil {
 			r.Unavailable = map[string]AgentIssue{}
 		}
 		r.Unavailable[problem.Agent] = AgentIssue{Kind: problem.Kind, Detail: problem.Detail, Since: now()}
+		if observed != nil {
+			r.Unavailable[problem.Agent] = *observed
+		}
 		delete(r.Sessions, problem.Agent)
 	})
 	if err != nil {
@@ -112,13 +129,14 @@ func (e *Engine) markUnavailable(id string, problem *AgentUnavailableError) erro
 	}
 	return e.Store.Event(id, problem.Agent, "unavailable", problem.Detail)
 }
-func (e *Engine) perform(ctx context.Context, r Run, t Task) error {
+func (e *Engine) performAvailable(ctx context.Context, r Run, t Task) error {
 	intended := requestedAgent(t)
 	for attempt := 0; attempt < 3; attempt++ {
 		fresh, err := e.Store.Run(r.ID)
 		if err != nil {
 			return err
 		}
+		fresh = e.reconcileHealth(fresh)
 		actual := intended
 		if issue, blocked := fresh.Unavailable[actual]; blocked {
 			if fresh.AvailabilityPolicy != "solo" || t.Stage == "independent_review" {
@@ -141,6 +159,7 @@ func (e *Engine) perform(ctx context.Context, r Run, t Task) error {
 			<-slot
 			return err
 		}
+		fresh = e.reconcileHealth(fresh)
 		if issue, blocked := fresh.Unavailable[actual]; blocked {
 			<-slot
 			if attempt == 2 {
@@ -169,6 +188,10 @@ func (e *Engine) perform(ctx context.Context, r Run, t Task) error {
 		}
 		var unavailable *AgentUnavailableError
 		retryable := err != nil && errors.As(err, &unavailable) && ctx.Err() == nil
+		if retryable && (unavailable.Kind == "network" || unavailable.Kind == "throttle") {
+			<-slot
+			return unavailable
+		}
 		if retryable {
 			if saveErr := e.markUnavailable(r.ID, unavailable); saveErr != nil {
 				<-slot
@@ -177,6 +200,9 @@ func (e *Engine) perform(ctx context.Context, r Run, t Task) error {
 		}
 		<-slot
 		if err == nil {
+			if e.Health != nil {
+				e.Health.Success(actual)
+			}
 			return nil
 		}
 		if !retryable {
@@ -228,6 +254,9 @@ func (e *Engine) SetAvailability(id string, options AvailabilityOptions, returnA
 	})
 	if err != nil {
 		return r, err
+	}
+	if returnAgent != "" && e.Health != nil {
+		e.Health.Clear(returnAgent)
 	}
 	err = e.Store.Event(id, "user", "availability", fmt.Sprintf("Политика: %s. Недоступен: %s. Разрешён повторный запрос: %s", a.Policy, a.UnavailableAgent, returnAgent))
 	return r, err

@@ -19,7 +19,7 @@ func TestAvailabilityDiagnostics(t *testing.T) {
 	for _, tc := range []struct{ agent, line, kind string }{
 		{"codex", `{"type":"turn.failed","error":{"message":"You've hit your usage limit"}}`, "limit"},
 		{"claude", `{"type":"result","is_error":true,"result":"Rate limit reached"}`, "limit"},
-		{"claude", `{"type":"assistant","error":"rate_limit","message":{"content":[{"type":"text","text":"Try later"}]}}`, "limit"},
+		{"claude", `{"type":"assistant","error":"rate_limit","message":{"content":[{"type":"text","text":"Try later"}]}}`, "throttle"},
 		{"codex", `{"type":"turn.failed","error":{"message":"Please log in"}}`, "auth"},
 		{"codex", `{"type":"turn.failed","error":{"message":"HTTP 503 service unavailable"}}`, "network"},
 		{"claude", `{"type":"assistant","message":{"content":[{"type":"text","text":"Implement a rate limit / unauthorized response"}]}}`, ""},

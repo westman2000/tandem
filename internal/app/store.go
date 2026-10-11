@@ -45,6 +45,8 @@ func OpenStore(dir string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	_, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
+	 CREATE TABLE IF NOT EXISTS agent_health(agent TEXT PRIMARY KEY, body TEXT NOT NULL);
+	 CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, status INTEGER NOT NULL DEFAULT 0, body TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
 	 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, body TEXT NOT NULL);
 	 CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, body TEXT NOT NULL);
 	 CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, body TEXT NOT NULL);
@@ -326,6 +328,9 @@ func (s *Store) CommitTask(runID, taskID, answer string, models ...string) error
 }
 
 func (s *Store) Recover() error {
+	if _, err := s.db.Exec("UPDATE requests SET status=-1 WHERE status=0"); err != nil {
+		return err
+	}
 	runs, err := s.Runs("")
 	if err != nil {
 		return err
@@ -349,8 +354,9 @@ func (s *Store) Recover() error {
 		if r.Status == "running" || r.Status == "pausing" {
 			_, err = s.UpdateRun(r.ID, func(r *Run) {
 				r.Status = "paused"
+				r.Recovery = &RecoveryState{Reason: "restart", At: now(), Detail: "Tandem был остановлен. Завершённые этапы сохранены; незавершённый ответ или проверка будут повторены после продолжения."}
 				if r.Prototype != nil {
-					if at, err := time.Parse(time.RFC3339Nano, r.Prototype.ActiveSince); err == nil {
+					if at, err := time.Parse(time.RFC3339Nano, r.Prototype.ActiveSince); err == nil && len(r.Waiting) == 0 {
 						elapsed := time.Since(at).Seconds()
 						if elapsed > 5 {
 							elapsed = 5
@@ -360,6 +366,7 @@ func (s *Store) Recover() error {
 						}
 						r.Prototype.ActiveSince = ""
 					}
+					r.Prototype.ActiveSince = ""
 					for i := range r.Prototype.Builds {
 						for j := range r.Prototype.Builds[i].Checks {
 							c := &r.Prototype.Builds[i].Checks[j]
@@ -371,6 +378,7 @@ func (s *Store) Recover() error {
 						}
 					}
 				}
+				r.Waiting = nil
 				r.Error = "Работа прервана перезапуском. Можно продолжить с последнего сохранённого этапа."
 				for i := range r.Tasks {
 					if r.Tasks[i].Status == "running" {
@@ -380,6 +388,9 @@ func (s *Store) Recover() error {
 				}
 			})
 			if err != nil {
+				return err
+			}
+			if err = s.Event(r.ID, "system", "recovery", "После перезапуска восстановлен сохранённый цикл. Ожидается явное продолжение пользователем."); err != nil {
 				return err
 			}
 		}

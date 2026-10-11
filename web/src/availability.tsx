@@ -3,6 +3,8 @@ import { useId } from 'react';
 export type Availability = { policy: string; unavailableAgent?: string };
 export type Review = { ready: boolean; summary: string; issues: string[]; manualChecks: string[] };
 export type AvailabilityRun = {
+ waiting?: Record<string,{agent:string;reason:string;attempt:number;detail:string;retryAt:string}>;
+ recovery?: {reason:string;at:string;detail:string};
  id: string; status: string; mode?: string; availabilityPolicy?: string; needsReview?: boolean;
  unavailable?: Record<string, { kind: string; detail: string; since: string }>;
  audits?: { id: string; agent: string; artifactTaskId: string; buildId?: string; finishedAt?: string; review?: Review }[];
@@ -22,7 +24,7 @@ export function AvailabilityFields({ value, change, disabled }: { value: Availab
  const id = useId();
  return <div className="availability-fields"><h3>Если участник недоступен</h3><div className="form-grid">
   <label htmlFor={id + '-policy'}>Поведение<select id={id + '-policy'} value={value.policy} disabled={disabled} onChange={e => change({ ...value, policy: e.target.value })}><option value="solo">Продолжить доступным агентом</option><option value="wait">Остановиться и ждать</option></select></label>
-  <label htmlFor={id + '-agent'}>Уже знаете о лимите?<select id={id + '-agent'} value={value.unavailableAgent || ''} disabled={disabled} onChange={e => change({ ...value, unavailableAgent: e.target.value })}><option value="">Оба могут участвовать</option><option value="claude">Claude сейчас недоступен</option><option value="codex">Codex сейчас недоступен</option></select></label>
+  <label htmlFor={id + '-agent'}>Отключить вручную<select id={id + '-agent'} value={value.unavailableAgent || ''} disabled={disabled} onChange={e => change({ ...value, unavailableAgent: e.target.value })}><option value="">Автоматически проверять обоих</option><option value="claude">Claude сейчас недоступен</option><option value="codex">Codex сейчас недоступен</option></select></label>
  </div><p className="muted">Один агент сможет продолжить работу и самопроверку. Независимое ревью можно запросить позже. Лимиты итераций сохраняются.</p></div>;
 }
 
@@ -39,7 +41,7 @@ export function AvailabilityPanel({ run, busy, act, buildId }: { run: Availabili
   <details open={Object.keys(run.unavailable || {}).length > 0}>
    <summary>Участники · {policy === 'solo' ? 'продолжать при недоступности' : 'ждать обоих'}</summary>
    <label>Если участник недоступен<select value={policy} disabled={busy || active} onChange={e => void settings({ policy: e.target.value })}><option value="solo">Продолжить доступным агентом</option><option value="wait">Остановиться и ждать</option></select></label>
-   {['codex', 'claude'].map(agent => <div className="availability-agent" key={agent}><div><strong>{names[agent]}</strong><p>{run.unavailable?.[agent]?.detail || 'Участие разрешено. Остаток лимита неизвестен.'}</p></div><button className="button secondary" disabled={busy || active} onClick={() => void settings({ policy, ...(run.unavailable?.[agent] ? { returnAgent: agent } : { unavailableAgent: agent }) })}>{run.unavailable?.[agent] ? 'Доступ восстановлен' : 'Временно отключить'}</button></div>)}
+   {['codex', 'claude'].map(agent => <div className="availability-agent" key={agent}><div><strong>{names[agent]}</strong><p>{run.unavailable?.[agent]?.detail || 'Участие разрешено. Текущий статус — в карточке агента.'}</p></div><button className="button secondary" disabled={busy || active} onClick={() => void settings({ policy, ...(run.unavailable?.[agent] ? { returnAgent: agent } : { unavailableAgent: agent }) })}>{run.unavailable?.[agent] ? 'Разрешить повторную проверку' : 'Временно отключить'}</button></div>)}
    {active && <p className="muted">Для изменения состава команды сначала поставьте работу на паузу.</p>}
    {['paused', 'failed'].includes(run.status) && <p className="muted">После изменения настроек нажмите «Продолжить». Сохранённые этапы повторяться не будут.</p>}
   </details>

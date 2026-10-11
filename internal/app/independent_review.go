@@ -165,6 +165,7 @@ func (e *Engine) executeAudit(ctx context.Context, initial Run) {
 					r.Tasks[i].Status = "pending"
 				}
 			}
+			finishRecovery(r, ctx, failure)
 			return
 		}
 		for i := range r.Audits {

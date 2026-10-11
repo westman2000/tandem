@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 func otherAgent(author string) string {
@@ -261,39 +260,18 @@ func (e *Engine) ApprovePrototype(id, hash string) (Run, error) {
 }
 func (e *Engine) executePrototype(parent context.Context, initial Run) {
 	p := initial.Prototype
-	remaining := time.Duration((float64(p.Config.MaxMinutes*60) - p.UsedSeconds) * float64(time.Second))
-	ctx, cancel := context.WithTimeout(parent, remaining)
-	defer cancel()
-	started := time.Now()
+	ctx, finishBudget := e.prototypeBudget(parent, initial.ID, float64(p.Config.MaxMinutes*60), p.UsedSeconds)
 	_, startErr := e.Store.UpdateRun(initial.ID, func(r *Run) { r.Prototype.ActiveSince = now() })
 	if startErr != nil {
+		finishBudget()
 		return
 	}
-	baseSeconds := p.UsedSeconds
-	heartbeatStop, heartbeatDone := make(chan struct{}), make(chan struct{})
-	go func() {
-		defer close(heartbeatDone)
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-heartbeatStop:
-				return
-			case <-ticker.C:
-				_, _ = e.Store.UpdateRun(initial.ID, func(r *Run) {
-					r.Prototype.UsedSeconds = baseSeconds + time.Since(started).Seconds()
-					r.Prototype.ActiveSince = now()
-				})
-			}
-		}
-	}()
 	var failure error
 	waiting := false
 	defer func() {
-		close(heartbeatStop)
-		<-heartbeatDone
+		usedSeconds := finishBudget()
 		_, err := e.Store.UpdateRun(initial.ID, func(r *Run) {
-			r.Prototype.UsedSeconds = baseSeconds + time.Since(started).Seconds()
+			r.Prototype.UsedSeconds = usedSeconds
 			r.Prototype.ActiveSince = ""
 			for i := range r.Tasks {
 				if r.Tasks[i].Status == "running" {
@@ -305,7 +283,7 @@ func (e *Engine) executePrototype(parent context.Context, initial Run) {
 			case parent.Err() != nil:
 				r.Status = "paused"
 				r.Error = "Работа приостановлена. Сохранённые изменения и журналы доступны. Прерванные проверки можно повторить."
-			case ctx.Err() != nil:
+			case usedSeconds >= float64(p.Config.MaxMinutes*60):
 				r.Status = "completed"
 				r.Quality = "limit"
 				r.StopReason = "Достигнут лимит активного времени. Изменения сохранены; можно выделить дополнительный цикл."
@@ -320,6 +298,7 @@ func (e *Engine) executePrototype(parent context.Context, initial Run) {
 				r.Status = "completed"
 				r.Error = ""
 			}
+			finishRecovery(r, parent, failure)
 		})
 		if err != nil {
 			_ = e.Store.Event(initial.ID, "system", "error", "Не удалось сохранить состояние: "+err.Error())

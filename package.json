@@ -1,12 +1,13 @@
 {
   "name": "tandem-local",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "node --test web/src/*.test.ts && esbuild web/tests/health.test.tsx --bundle --platform=node --format=esm --packages=external --outfile=.tools/health-tests.mjs && node --test .tools/health-tests.mjs"
   },
   "dependencies": {
     "react": "19.2.0",

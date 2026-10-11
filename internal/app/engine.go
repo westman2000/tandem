@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,14 +13,16 @@ import (
 )
 
 type Engine struct {
-	Store      *Store
-	Runner     AgentRunner
-	mu         sync.Mutex
-	active     map[string]context.CancelFunc
-	wg         sync.WaitGroup
-	agentSlots map[string]chan struct{}
-	preview    *http.Server
-	closing    bool
+	Health      *HealthMonitor
+	RetryDelays []time.Duration
+	Store       *Store
+	Runner      AgentRunner
+	mu          sync.Mutex
+	active      map[string]context.CancelFunc
+	wg          sync.WaitGroup
+	agentSlots  map[string]chan struct{}
+	preview     *http.Server
+	closing     bool
 }
 
 func NewEngine(s *Store, runner AgentRunner) *Engine {
@@ -31,7 +34,13 @@ func (e *Engine) Close() {
 	if e.preview != nil {
 		_ = e.preview.Close()
 	}
-	for _, cancel := range e.active {
+	for id, cancel := range e.active {
+		_, _ = e.Store.UpdateRun(id, func(r *Run) {
+			if r.Recovery == nil {
+				r.Recovery = &RecoveryState{Reason: "shutdown", At: now(), Detail: "Сервер Tandem остановлен. После запуска продолжите с последнего сохранённого этапа."}
+			}
+		})
+		_ = e.Store.Event(id, "system", "shutdown", "Tandem завершает работу. Незавершённый этап остановлен; продолжение потребуется запустить явно.")
 		cancel()
 	}
 	e.mu.Unlock()
@@ -232,6 +241,13 @@ func (e *Engine) startLocked(id string) (Run, error) {
 	r, err = e.Store.UpdateRun(id, func(r *Run) {
 		r.Status = "running"
 		r.Error = ""
+		r.Waiting = nil
+		r.Recovery = nil
+		for agent, issue := range r.Unavailable {
+			if transient(issue.Kind) {
+				delete(r.Unavailable, agent)
+			}
+		}
 		for i := range r.Tasks {
 			if r.Tasks[i].Status == "running" {
 				r.Tasks[i].Status = "pending"
@@ -241,6 +257,7 @@ func (e *Engine) startLocked(id string) (Run, error) {
 	if err != nil {
 		return r, err
 	}
+	_ = e.Store.Event(id, "system", "resumed", "Выполнение начато с последнего сохранённого этапа")
 	ctx, cancel := context.WithCancel(context.Background())
 	e.active[id] = cancel
 	e.wg.Add(1)
@@ -261,8 +278,12 @@ func (e *Engine) Pause(id string) (Run, error) {
 	if !ok {
 		return Run{}, errors.New("Цикл сейчас не работает")
 	}
-	r, err := e.Store.UpdateRun(id, func(r *Run) { r.Status = "pausing" })
+	r, err := e.Store.UpdateRun(id, func(r *Run) {
+		r.Status = "pausing"
+		r.Recovery = &RecoveryState{Reason: "manual", At: now(), Detail: "Вы поставили работу на паузу. Автоматического продолжения не будет."}
+	})
 	if err == nil {
+		_ = e.Store.Event(id, "user", "paused", "Пользователь остановил работу")
 		cancel()
 	}
 	return r, err
@@ -387,6 +408,7 @@ func (e *Engine) execute(ctx context.Context, id string) {
 			r.Status = "completed"
 			r.Error = ""
 		}
+		finishRecovery(r, ctx, failure)
 	})
 	if err != nil {
 		_ = e.Store.Event(id, "system", "error", "Не удалось сохранить состояние цикла")
@@ -413,11 +435,24 @@ func (e *Engine) performOnce(ctx context.Context, r Run, task Task) error {
 	if err := e.Store.Event(r.ID, task.Agent, "stage", stageLabel(task.Stage)); err != nil {
 		return err
 	}
+	accountKey := ""
+	if e.Health != nil {
+		accountKey = e.Health.Identity(task.Agent)
+	}
 	var logMu sync.Mutex
 	var logError error
 	emit := func(kind, text string) {
 		logMu.Lock()
 		defer logMu.Unlock()
+		if kind == "quota" {
+			if e.Health != nil {
+				var q QuotaReading
+				if json.Unmarshal([]byte(text), &q) == nil {
+					e.Health.ObserveAccount(task.Agent, accountKey, q)
+				}
+			}
+			return
+		}
 		if kind == "session" {
 			_, err := e.Store.UpdateRun(r.ID, func(r *Run) { r.Sessions[task.Agent] = text })
 			if err != nil {

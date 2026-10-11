@@ -55,6 +55,8 @@ type Task struct {
 }
 
 type Run struct {
+	Waiting            map[string]WaitState  `json:"waiting,omitempty"`
+	Recovery           *RecoveryState        `json:"recovery,omitempty"`
 	AvailabilityPolicy string                `json:"availabilityPolicy,omitempty"`
 	Unavailable        map[string]AgentIssue `json:"unavailable,omitempty"`
 	NeedsReview        bool                  `json:"needsReview,omitempty"`
@@ -96,13 +98,15 @@ type Event struct {
 }
 
 type AgentStatus struct {
-	Agent         string `json:"agent"`
-	Installed     bool   `json:"installed"`
-	Authenticated bool   `json:"authenticated"`
-	Subscription  bool   `json:"subscription"`
-	Version       string `json:"version"`
-	Detail        string `json:"detail"`
-	LoginCommand  string `json:"loginCommand"`
+	AccountKey    string       `json:"-"`
+	Health        *AgentHealth `json:"health,omitempty"`
+	Agent         string       `json:"agent"`
+	Installed     bool         `json:"installed"`
+	Authenticated bool         `json:"authenticated"`
+	Subscription  bool         `json:"subscription"`
+	Version       string       `json:"version"`
+	Detail        string       `json:"detail"`
+	LoginCommand  string       `json:"loginCommand"`
 }
 
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }

@@ -2396,3 +2396,26 @@ select {
 .audit-history article { margin-top: 14px; padding-top: 12px; border-top: 1px solid #dfdfd4; }
 .audit-history small { display: block; margin-top: 6px; color: #73766e; }
 @media(max-width: 640px) { .availability-agent { align-items: flex-start; flex-direction: column; } }
+
+/* Connection, subscription evidence, and recovery remain visible beside work. */
+.agent-health { padding: 17px 0; border-bottom: 1px solid var(--line, #e8e4df); }
+.health-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.health-dot { width: 9px; height: 9px; border-radius: 50%; background: #aaa69f; flex: none; }
+.health-dot.available { background: #5d7c69; }
+.health-dot.warning { background: #b18035; }
+.health-dot.blocked { background: #b85448; }
+.agent-health p { font-size: 12px; line-height: 1.5; margin: 8px 0; }
+.agent-health small { display: block; font-size: 11px; line-height: 1.5; color: #77716c; overflow-wrap: anywhere; }
+.quota-window { margin-top: 13px; }
+.quota-window > div { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; }
+.quota-window strong { font-weight: 500; text-align: right; }
+.quota-window meter { display: block; width: 100%; height: 12px; accent-color: #9b794f; }
+.health-notice { padding: 8px 10px; background: #f6edda; border-radius: 7px; color: #735421; }
+.health-settings { display: grid; grid-template-columns: repeat(auto-fit,minmax(230px,1fr)); gap: 24px; }
+.recovery-panel { margin-bottom: 20px; padding: 20px; border: 1px solid #d9c7a1; border-radius: 12px; background: #fcf8ef; }
+.recovery-panel p { font-size: 13px; line-height: 1.6; margin: 10px 0; }
+.recovery-panel small { color: #77716c; }
+.draft-notice { display: block; margin: 7px 0; color: #77716c; font-size: 11px; line-height: 1.5; }
+.draft-error { color: #a74335; }
+.health-alerts { border-left: 3px solid #b18035; background: #fbf4e7; padding: 4px 16px; margin-bottom: 20px; border-radius: 0 8px 8px 0; }
+.health-alerts p { font-size: 13px; line-height: 1.5; margin: 9px 0; }

@@ -1,0 +1,28 @@
+import type { AvailabilityRun } from './availability';
+export type Quota = { id:string; label:string; checkedAt?:string; scope?:string; usedPercent?:number; resetsAt?:number; state:string };
+export type Agent = { agent:string; installed:boolean; authenticated:boolean; subscription:boolean; version:string; detail:string; loginCommand:string; health?:{quotaMode:string; checkedAt?:string; checkError?:string; lastSuccessAt?:string; issue?:{kind:string;detail:string;since:string}; notice?:string; quota?:{source:string;checkedAt:string;allowed?:boolean;windows:Quota[]}} };
+const names:Record<string,string>={codex:'Codex',claude:'Claude Code'};
+function age(date?:string) {if(!date)return 'ещё не проверялось';const mins=Math.max(0,Math.floor((Date.now()-Date.parse(date))/60000));return mins<1?'только что':`${mins} мин назад`;}
+export function DraftNotice({status}:{status:string}) {return <small className={`draft-notice ${status==='error'?'draft-error':''}`} role="status">{status==='error'?'Не удалось сохранить черновик в браузере. Скопируйте текст перед закрытием.':status==='saved'?'Черновик сохранён в этом браузере':'Текст сохраняется в этом браузере по мере ввода'}</small>;}
+export function AgentHealthCard({agent,task,manual,model}:{agent:Agent;task?:string;manual?:string;model?:string}) {
+ const h=agent.health,q=h?.quota,stale=!!q&&(Date.now()-Date.parse(q.checkedAt)>5*60000||!!h?.checkError||q.windows.some(w=>w.checkedAt&&Date.now()-Date.parse(w.checkedAt)>5*60000));
+ const blocked=h?.issue?.kind==='limit'||q?.allowed===false||q?.windows.some(w=>w.state==='blocked');
+ const warning=!!h?.notice||stale,unknown=!q||(q.allowed===undefined&&q.windows.every(w=>w.usedPercent===undefined&&!['blocked','warning'].includes(w.state)));
+ const state=manual?'Отключён в этом цикле':!h?.checkedAt?'Проверяем вход':!agent.subscription?agent.detail:blocked?'Есть ограничение лимита':h?.issue?.kind==='network'?'Ошибка связи с сервисом':h?.issue?.kind==='throttle'?'Сервис просит подождать':unknown?'Вход подтверждён · лимит неизвестен':stale?'Данные лимита устарели':'Вход подтверждён';
+ return <article className="agent-health" aria-label={`Состояние ${names[agent.agent]}`}><div className="health-heading"><strong>{names[agent.agent]}</strong><span className={`health-dot ${blocked||manual?'blocked':warning?'warning':unknown?'unknown':'available'}`} /></div><p>{state}</p>{task&&<p className="agent-working">{task}</p>}{model&&<small>{model}</small>}
+ {q?.windows.map(w=><div className={`quota-window ${w.state}`} key={w.id}><div><span>{w.label}</span><strong>{w.usedPercent===undefined?(w.state==='blocked'?'Лимит достигнут':w.state==='warning'?'Мало осталось':'Процент не передан'):`Осталось ${Math.max(0,100-w.usedPercent).toFixed(0)}%`}</strong></div>{w.usedPercent!==undefined&&<meter aria-label={`${w.label}: использовано`} min={0} max={100} value={Math.min(100,w.usedPercent)} />}{w.checkedAt&&Date.now()-Date.parse(w.checkedAt)>300000&&<small>Последнее значение: {age(w.checkedAt)}</small>}{!!w.resetsAt&&<small>{w.resetsAt*1000>Date.now()?`Сброс: ${new Date(w.resetsAt*1000).toLocaleString('ru')}`:'Время сброса прошло · ожидаем подтверждение'}</small>}</div>)}
+ {h?.notice&&<p className="health-notice" role="status">{h.notice}</p>}{h?.checkError&&<p className="health-notice">{h.checkError}</p>}
+ {!q&&agent.subscription&&<small>{h?.quotaMode==='events'?'Claude передаёт сведения о лимите во время запросов. До получения данных остаток неизвестен.':'Данные лимита ещё не получены.'}</small>}
+ <small>{q?`Лимит: ${age(q.checkedAt)}${stale?' · последнее известное значение':''}`:`Проверка входа: ${age(h?.checkedAt)}`}</small>
+ </article>;
+}
+export function RecoveryPanel({run,busy,act,openSaved}:{run:AvailabilityRun;busy:boolean;act:(path:string,body?:unknown)=>Promise<boolean>;openSaved?:()=>void}) {
+ const waiting=Object.values(run.waiting||{}),paused=['paused','failed'].includes(run.status);
+ if(!waiting.length&&!run.recovery)return null;
+ return <section className="recovery-panel" role="status" aria-label="Восстановление работы"><strong>{waiting.length?'Ожидаем соединение':run.recovery?.reason==='restart'?'Работа восстановлена после перезапуска':'Работа сохранена'}</strong>
+ {waiting.map((w,i)=><p key={i}>{w.detail}<br/><small>Следующая попытка: {new Date(w.retryAt).toLocaleTimeString('ru')} · ожидание не расходует активные минуты</small></p>)}
+ {!waiting.length&&<><p>{run.recovery?.detail}</p><p>Завершено этапов: {run.tasks.filter(t=>t.status==='done').length} из {run.tasks.length}. Незавершённый ответ может потребовать повторного расхода лимита.</p></>}
+ <div className="conversation-actions">{paused&&<button className="button primary" disabled={busy} onClick={()=>void act(`runs/${run.id}/resume`)}>Продолжить сохранённую работу</button>}{!!waiting.length&&<button className="button secondary" disabled={busy||run.status==='pausing'} onClick={()=>void act(`runs/${run.id}/pause`)}>Остановить ожидание</button>}{openSaved&&<button className="button secondary" onClick={openSaved}>Посмотреть сохранённое</button>}</div></section>;
+}
+
+export function HealthAlerts({agents}:{agents:Agent[]}) {const alerts=agents.filter(a=>a.health?.notice);if(!alerts.length)return null;return <div className="health-alerts" role="status">{alerts.map(a=><p key={a.agent}><strong>{names[a.agent]}:</strong> {a.health!.notice}{a.health!.quota&&Date.now()-Date.parse(a.health!.quota.checkedAt)>300000&&<small> · по последним полученным данным</small>}</p>)}</div>;}
