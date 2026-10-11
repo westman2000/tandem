@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	_ "modernc.org/sqlite"
@@ -249,7 +250,7 @@ func (s *Store) Events(run string) ([]Event, error) {
 }
 
 // CommitTask saves the checkpoint and visible answer in one transaction.
-func (s *Store) CommitTask(runID, taskID, answer string) error {
+func (s *Store) CommitTask(runID, taskID, answer string, models ...string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r, err := s.Run(runID)
@@ -269,6 +270,20 @@ func (s *Store) CommitTask(runID, taskID, answer string) error {
 	if task.Status == "done" {
 		return nil
 	}
+	if len(models) > 0 {
+		task.Model = models[0]
+	}
+	if task.Model != "" {
+		if r.LockedModels == nil {
+			r.LockedModels = map[string]string{}
+		}
+		if r.LockedModels[task.Agent] == "" {
+			r.LockedModels[task.Agent] = task.Model
+			if strings.HasSuffix(r.Models[task.Agent], "[1m]") {
+				r.LockedModels[task.Agent] += "[1m]"
+			}
+		}
+	}
 	task.Status = "done"
 	task.Output = answer
 	task.FinishedAt = now()
@@ -276,7 +291,7 @@ func (s *Store) CommitTask(runID, taskID, answer string) error {
 	if task.Stage == "draft" || task.Stage == "revision" {
 		r.Document = answer
 	}
-	m := Message{ID: ID(), ProjectID: r.ProjectID, RunID: r.ID, Actor: task.Agent, Target: "all", Text: answer, Stage: task.Stage, Demo: r.Mode == "demo", CreatedAt: now()}
+	m := Message{ID: ID(), ProjectID: r.ProjectID, RunID: r.ID, Actor: task.Agent, Model: task.Model, Target: "all", Text: answer, Stage: task.Stage, Demo: r.Mode == "demo", CreatedAt: now()}
 	rb, _ := json.Marshal(r)
 	mb, _ := json.Marshal(m)
 	tx, err := s.db.Begin()
@@ -299,6 +314,21 @@ func (s *Store) Recover() error {
 		return err
 	}
 	for _, r := range runs {
+		if r.Mode == "live" && len(r.LockedModels) == 0 {
+			models := map[string]string{}
+			for agent, session := range r.Sessions {
+				if model := sessionModel(agent, session); model != "" {
+					models[agent] = model
+				}
+			}
+			if len(models) > 0 {
+				var err error
+				r, err = s.UpdateRun(r.ID, func(r *Run) { r.LockedModels = models })
+				if err != nil {
+					return err
+				}
+			}
+		}
 		if r.Status == "running" || r.Status == "pausing" {
 			_, err = s.UpdateRun(r.ID, func(r *Run) {
 				r.Status = "paused"

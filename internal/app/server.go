@@ -114,7 +114,11 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			problem(w, 500, err)
 			return
 		}
-		respond(w, 200, map[string]any{"token": s.Token, "projects": p, "version": "0.1.0", "dataDir": s.Store.Dir})
+		respond(w, 200, map[string]any{"token": s.Token, "projects": p, "version": "0.2.0", "dataDir": s.Store.Dir})
+		return
+	}
+	if path == "models" && r.Method == "GET" {
+		respond(w, 200, modelCatalog(s.Store))
 		return
 	}
 	if path == "agents" && r.Method == "GET" {
@@ -169,10 +173,11 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(parts) == 3 && parts[2] == "runs" && r.Method == "POST" {
 			var in struct {
-				Mode         string `json:"mode"`
-				Brief        string `json:"brief"`
-				MaxRevisions int    `json:"maxRevisions"`
-				Acceptance   string `json:"acceptance"`
+				Mode         string            `json:"mode"`
+				Brief        string            `json:"brief"`
+				MaxRevisions int               `json:"maxRevisions"`
+				Acceptance   string            `json:"acceptance"`
+				Models       map[string]string `json:"models"`
 			}
 			if err := decode(w, r, &in); err != nil {
 				problem(w, 400, err)
@@ -182,9 +187,9 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if in.MaxRevisions == 0 {
-				in.MaxRevisions = 3
+				in.MaxRevisions = DefaultRevisions
 			}
-			run, err := s.Engine.Create(p.ID, in.Mode, in.Brief, in.MaxRevisions, in.Acceptance)
+			run, err := s.Engine.Create(p.ID, in.Mode, in.Brief, in.MaxRevisions, in.Acceptance, in.Models)
 			if err != nil {
 				problem(w, 409, err)
 				return
@@ -293,6 +298,19 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(parts) == 3 && r.Method == "POST" {
 			switch parts[2] {
+			case "continue":
+				var in struct {
+					MaxRevisions int    `json:"maxRevisions"`
+					Instruction  string `json:"instruction"`
+				}
+				if err := decode(w, r, &in); err != nil {
+					problem(w, 400, err)
+					return
+				}
+				if run.Mode == "live" && !s.checkAgents(w, r.Context()) {
+					return
+				}
+				run, err = s.Engine.Continue(run.ID, in.MaxRevisions, in.Instruction)
 			case "pause":
 				run, err = s.Engine.Pause(run.ID)
 			case "resume":

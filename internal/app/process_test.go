@@ -21,7 +21,7 @@ func TestCLIRunnerRequiresCompleteTurn(t *testing.T) {
 		name, body string
 		wantError  bool
 	}{
-		{"complete", "echo '{\"type\":\"thread.started\",\"thread_id\":\"session-test\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Working\"}}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Final document\"}}'\necho '{\"type\":\"turn.completed\"}'\n", false},
+		{"complete", "echo '{\"type\":\"thread.started\",\"thread_id\":\"session-test\",\"model\":\"gpt-test\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Working\"}}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Final document\"}}'\necho '{\"type\":\"turn.completed\"}'\n", false},
 		{"truncated", "echo '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Partial answer\"}}'\n", true},
 		{"failure", "echo 'PRIVATE_CREDENTIAL' >&2\nexit 1\n", true},
 	}
@@ -41,6 +41,44 @@ func TestCLIRunnerRequiresCompleteTurn(t *testing.T) {
 				t.Fatalf("bad result: %+v", result)
 			}
 		})
+	}
+}
+
+func TestCLIRunnerModelFromExactSessionLog(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix shell fixture")
+	}
+	dir := t.TempDir()
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CODEX_HOME", dir)
+	logDir := filepath.Join(dir, "sessions", "2026", "10", "11")
+	if err := os.MkdirAll(logDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(logDir, "rollout-fixture-session.jsonl")
+	if err := os.WriteFile(log, []byte(`{"type":"turn_context","payload":{"model":"gpt-actual","developer_instructions":"PRIVATE"}}`+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	script := `#!/bin/sh
+printf '%s\n' '{"type":"thread.started","thread_id":"fixture-session"}' '{"type":"item.completed","item":{"type":"agent_message","text":"Answer"}}' '{"type":"turn.completed"}'
+`
+	if err := os.WriteFile(filepath.Join(dir, "codex"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	result, err := (CLIRunner{}).Run(context.Background(), AgentInput{Agent: "codex", Directory: dir, Prompt: "test"}, func(_, v string) {
+		if strings.Contains(v, "PRIVATE") {
+			t.Fatal("metadata leaked private instructions")
+		}
+	})
+	if err != nil || result.Model != "gpt-actual" {
+		t.Fatalf("metadata not detected: %+v %v", result, err)
+	}
+	if err := os.Remove(log); err != nil {
+		t.Fatal(err)
+	}
+	_, err = (CLIRunner{}).Run(context.Background(), AgentInput{Agent: "codex", Directory: dir, Prompt: "test", Model: "requested"}, func(string, string) {})
+	if err == nil || !strings.Contains(err.Error(), "фактическую модель") {
+		t.Fatal("unknown model silently treated as requested model")
 	}
 }
 

@@ -46,9 +46,43 @@ func plan() []Task {
 	return tasks
 }
 
-func (e *Engine) Create(project, mode, brief string, maxRevisions int, acceptance string) (Run, error) {
+const DefaultRevisions = 5
+const MaxRevisions = 10
+
+func (e *Engine) Create(project, mode, brief string, maxRevisions int, acceptance string, models ...map[string]string) (Run, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	chosen := map[string]string{}
+	if len(models) > 0 {
+		chosen = models[0]
+	}
+	return e.createLocked(project, mode, brief, maxRevisions, acceptance, chosen, nil, "")
+}
+
+func (e *Engine) Continue(id string, maxRevisions int, instruction string) (Run, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	parent, err := e.Store.Run(id)
+	if err != nil {
+		return Run{}, err
+	}
+	if (parent.Status != "completed" && parent.Status != "stopped") || parent.Document == "" {
+		return Run{}, errors.New("Доработку можно начать после завершения цикла с документом")
+	}
+	if len(instruction) > 10_000 {
+		return Run{}, errors.New("Уточнение слишком длинное")
+	}
+	chosen := map[string]string{}
+	for k, v := range parent.Models {
+		chosen[k] = v
+	}
+	for k, v := range parent.LockedModels {
+		chosen[k] = v
+	}
+	return e.createLocked(parent.ProjectID, parent.Mode, parent.Brief, maxRevisions, parent.Acceptance, chosen, &parent, strings.TrimSpace(instruction))
+}
+
+func (e *Engine) createLocked(project, mode, brief string, maxRevisions int, acceptance string, models map[string]string, parent *Run, instruction string) (Run, error) {
 	if e.closing {
 		return Run{}, errors.New("Сервер завершает работу")
 	}
@@ -58,8 +92,22 @@ func (e *Engine) Create(project, mode, brief string, maxRevisions int, acceptanc
 	if strings.TrimSpace(brief) == "" || len(brief) > 50_000 {
 		return Run{}, errors.New("Нужно описание задачи длиной до 50 000 байт")
 	}
-	if maxRevisions < 1 || maxRevisions > 5 {
-		return Run{}, errors.New("Выберите от 1 до 5 проходов проверки")
+	if maxRevisions == 0 {
+		maxRevisions = DefaultRevisions
+	}
+	if maxRevisions < 1 || maxRevisions > MaxRevisions {
+		return Run{}, errors.New("Выберите от 1 до 10 проходов проверки")
+	}
+	chosen := map[string]string{}
+	for agent, model := range models {
+		if agent != "codex" && agent != "claude" {
+			return Run{}, errors.New("Неизвестный агент в выборе моделей")
+		}
+		model = strings.TrimSpace(model)
+		if !validModel(model) {
+			return Run{}, errors.New("Некорректное название модели")
+		}
+		chosen[agent] = model
 	}
 	if len(acceptance) > 10_000 {
 		return Run{}, errors.New("Критерии готовности слишком длинные")
@@ -85,6 +133,18 @@ func (e *Engine) Create(project, mode, brief string, maxRevisions int, acceptanc
 		return Run{}, err
 	}
 	r := Run{ID: ID(), ProjectID: project, Mode: mode, Kind: "design", Status: "paused", Title: p.Title, Brief: brief, Tasks: plan(), Sessions: map[string]string{}, Materials: materials, CreatedAt: now(), UpdatedAt: now()}
+	r.Models = chosen
+	r.LockedModels = map[string]string{}
+	if parent != nil {
+		r.ParentRunID = parent.ID
+		r.Continuation = instruction
+		r.Materials = parent.Materials
+		r.Document = parent.Document
+		for k, v := range parent.LockedModels {
+			r.LockedModels[k] = v
+		}
+		r.Tasks = []Task{{ID: ID(), Agent: "codex", Stage: "revision", Phase: 4, Status: "pending"}, {ID: ID(), Agent: "claude", Stage: "verify", Phase: 5, Status: "pending"}}
+	}
 	r.MaxRevisions = maxRevisions
 	r.Acceptance = acceptance
 	r.Quality = "pending"
@@ -94,7 +154,11 @@ func (e *Engine) Create(project, mode, brief string, maxRevisions int, acceptanc
 	if err = e.Store.PutRun(r); err != nil {
 		return r, err
 	}
-	if err = e.Store.AddMessage(Message{ProjectID: project, RunID: r.ID, Actor: "user", Target: "all", Text: brief, Stage: "brief", Demo: mode == "demo"}); err != nil {
+	opening := brief
+	if parent != nil {
+		opening = "Продолжить доработку предыдущего документа и замечаний.\n" + instruction
+	}
+	if err = e.Store.AddMessage(Message{ProjectID: project, RunID: r.ID, Actor: "user", Target: "all", Text: opening, Stage: "brief", Demo: mode == "demo"}); err != nil {
 		return r, err
 	}
 	p.Brief = brief
@@ -188,7 +252,7 @@ func (e *Engine) Finish(id string) (Run, error) {
 
 func (e *Engine) execute(ctx context.Context, id string) {
 	var failure error
-	for phase := 0; phase < 16; phase++ {
+	for phase := 0; phase < 4+2*MaxRevisions; phase++ {
 		if ctx.Err() != nil {
 			break
 		}
@@ -197,7 +261,7 @@ func (e *Engine) execute(ctx context.Context, id string) {
 			failure = err
 			break
 		}
-		if r.Quality == "ready" || r.Quality == "limit" {
+		if r.Quality == "ready" || r.Quality == "limit" || r.Quality == "stalled" {
 			break
 		}
 		var wg sync.WaitGroup
@@ -234,6 +298,11 @@ func (e *Engine) execute(ctx context.Context, id string) {
 				}
 				if reviewReady(verification) {
 					r.Quality = "ready"
+					return
+				}
+				if reason := stagnationReason(*r); reason != "" {
+					r.Quality = "stalled"
+					r.StopReason = reason
 					return
 				}
 				if count >= r.MaxRevisions {
@@ -320,7 +389,7 @@ func (e *Engine) perform(ctx context.Context, r Run, task Task) error {
 		}
 		callCtx, cancel := context.WithTimeout(ctx, 20*time.Minute)
 		defer cancel()
-		result, err = e.Runner.Run(callCtx, AgentInput{Agent: task.Agent, Directory: filepath.Join(e.Store.Dir, "runs", r.ID, task.Agent), Session: r.Sessions[task.Agent], Prompt: prompt, Stage: task.Stage}, emit)
+		result, err = e.Runner.Run(callCtx, AgentInput{Agent: task.Agent, Directory: filepath.Join(e.Store.Dir, "runs", r.ID, task.Agent), Session: r.Sessions[task.Agent], Prompt: prompt, Stage: task.Stage, Model: runModel(r, task.Agent)}, emit)
 		if err != nil {
 			return err
 		}
@@ -328,7 +397,20 @@ func (e *Engine) perform(ctx context.Context, r Run, task Task) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	return e.Store.CommitTask(r.ID, task.ID, result.Text)
+	if r.Mode == "live" && result.Model != "" {
+		expected := strings.TrimSuffix(r.LockedModels[task.Agent], "[1m]")
+		if expected == "" {
+			selected := strings.TrimSuffix(r.Models[task.Agent], "[1m]")
+			if task.Agent == "codex" || strings.HasPrefix(selected, "claude-") {
+				expected = selected
+			}
+		}
+		if expected != "" && expected != result.Model {
+			_ = e.Store.Event(r.ID, task.Agent, "model", "CLI сообщил модель "+result.Model+"; ожидалась "+expected)
+			return fmt.Errorf("%s сменил модель с %s на %s. Ответ не принят; создайте новый цикл с нужной моделью", task.Agent, expected, result.Model)
+		}
+	}
+	return e.Store.CommitTask(r.ID, task.ID, result.Text, result.Model)
 }
 
 func (e *Engine) prompt(r Run, task Task) (string, error) {
@@ -339,14 +421,51 @@ func (e *Engine) prompt(r Run, task Task) (string, error) {
 	for _, m := range r.Materials {
 		fmt.Fprintf(&b, "\n--- Материал %q; роль %s; SHA256 %s ---\n%s\n--- Конец материала ---\n", m.Name, m.Role, m.SHA256, m.Text)
 	}
-	runs, err := e.Store.Runs(r.ProjectID)
-	if err != nil {
-		return "", err
-	}
-	for _, prev := range runs {
-		if prev.ID != r.ID && prev.CreatedAt < r.CreatedAt && prev.Mode == r.Mode && prev.Document != "" {
-			fmt.Fprintf(&b, "\nПредыдущая версия документа, исходная точка для этого цикла:\n%s\n", prev.Document)
-			break
+	if r.ParentRunID != "" {
+		parent, err := e.Store.Run(r.ParentRunID)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "\nДокумент для продолжения доработки:\n%s\n", parent.Document)
+		for i := len(parent.Tasks) - 1; i >= 0; i-- {
+			t := parent.Tasks[i]
+			if t.Status == "done" && (t.Stage == "verify" || t.Stage == "review") {
+				fmt.Fprintf(&b, "\nПоследние замечания проверяющего:\n%s\n", t.Output)
+				break
+			}
+		}
+		// Preserve all user steering from the lineage, including per-agent targets.
+		ancestor := parent
+		for depth := 0; depth < 100; depth++ {
+			fmt.Fprintf(&b, "\nУточнение предыдущей доработки:\n%s\n", ancestor.Continuation)
+			msgs, err := e.Store.Messages(ancestor.ProjectID)
+			if err != nil {
+				return "", err
+			}
+			for _, m := range msgs {
+				if m.RunID == ancestor.ID && m.Actor == "user" && m.Stage == "steering" && (m.Target == "all" || m.Target == task.Agent) {
+					fmt.Fprintf(&b, "\nУточнение пользователя:\n%s\n", m.Text)
+				}
+			}
+			if ancestor.ParentRunID == "" {
+				break
+			}
+			ancestor, err = e.Store.Run(ancestor.ParentRunID)
+			if err != nil {
+				return "", err
+			}
+		}
+		fmt.Fprintf(&b, "\nНовое уточнение пользователя для доработки:\n%s\n", r.Continuation)
+	} else {
+		runs, err := e.Store.Runs(r.ProjectID)
+		if err != nil {
+			return "", err
+		}
+		for _, prev := range runs {
+			if prev.ID != r.ID && prev.CreatedAt < r.CreatedAt && prev.Mode == r.Mode && prev.Document != "" {
+				fmt.Fprintf(&b, "\nПредыдущая версия документа, исходная точка для этого цикла:\n%s\n", prev.Document)
+				break
+			}
 		}
 	}
 	for _, t := range r.Tasks {
@@ -370,6 +489,9 @@ func (e *Engine) prompt(r Run, task Task) (string, error) {
 		"draft":    "Составь цельный черновик ТЗ на основе обсуждения. Включи цель, аудиторию, пользовательские сценарии, функциональные и нефункциональные требования, данные, архитектуру, ограничения MVP, критерии приёмки, тестирование, план реализации и открытые вопросы. Не добавляй лишний масштаб. До 2000 слов.",
 		"review":   "Проведи проверку черновика ТЗ. Укажи конкретные недостатки и исправления: противоречия, непроверяемые критерии, пропущенные сценарии, избыточную сложность. Отдельно отметь решения, которые требуют ответа пользователя. До 800 слов.",
 		"revision": "Выпусти полную обновлённую версию ТЗ с учётом замечаний. Это самостоятельный документ, который можно скачать. Раздели решения, допущения и открытые вопросы. Требования должны иметь проверяемые критерии приёмки. В конце кратко перечисли учтённые замечания. До 2500 слов.",
+	}
+	if task.Stage == "verify" {
+		b.WriteString("\nПеред финальным маркером готовности добавь отдельную строку [TANDEM_PROGRESS], если существенные замечания предыдущей проверки устранены хотя бы частично, либо [TANDEM_NO_PROGRESS], если существенные замечания повторяются без заметного улучшения документа. Для первой проверки этого цикла используй [TANDEM_PROGRESS]. Сначала объясни эту оценку обычным текстом. Не считай форматирование или перефразирование существенным улучшением.\n")
 	}
 	fmt.Fprintf(&b, "\nТекущий этап: %s\n%s\n", stageLabel(task.Stage), instructions[task.Stage])
 	return b.String(), nil

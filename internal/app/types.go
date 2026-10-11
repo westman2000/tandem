@@ -11,6 +11,7 @@ type Project struct {
 }
 
 type Message struct {
+	Model     string `json:"model,omitempty"`
 	ID        string `json:"id"`
 	ProjectID string `json:"projectId"`
 	RunID     string `json:"runId"`
@@ -36,6 +37,7 @@ type Material struct {
 }
 
 type Task struct {
+	Model      string `json:"model,omitempty"`
 	ID         string `json:"id"`
 	Agent      string `json:"agent"`
 	Stage      string `json:"stage"`
@@ -47,6 +49,11 @@ type Task struct {
 }
 
 type Run struct {
+	Models       map[string]string `json:"models,omitempty"`
+	LockedModels map[string]string `json:"lockedModels,omitempty"`
+	ParentRunID  string            `json:"parentRunId,omitempty"`
+	Continuation string            `json:"continuation,omitempty"`
+	StopReason   string            `json:"stopReason,omitempty"`
 	MaxRevisions int               `json:"maxRevisions"`
 	Acceptance   string            `json:"acceptance"`
 	Quality      string            `json:"quality"`

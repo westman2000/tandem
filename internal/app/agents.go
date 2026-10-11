@@ -103,8 +103,8 @@ func agentStatus(ctx context.Context, agent string) AgentStatus {
 	return s
 }
 
-type AgentInput struct{ Agent, Directory, Session, Prompt, Stage string }
-type AgentResult struct{ Text, Session string }
+type AgentInput struct{ Agent, Directory, Session, Prompt, Stage, Model string }
+type AgentResult struct{ Text, Session, Model string }
 type AgentRunner interface {
 	Run(context.Context, AgentInput, func(string, string)) (AgentResult, error)
 }
@@ -113,6 +113,9 @@ type CLIRunner struct{}
 func commandArgs(in AgentInput) []string {
 	if in.Agent == "claude" {
 		args := []string{"-p", "--output-format", "stream-json", "--verbose", "--restricted", "--safe-mode", "--tools", "", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`}
+		if in.Model != "" {
+			args = append(args, "--model", in.Model)
+		}
 		if in.Session != "" {
 			args = append(args, "--resume", in.Session)
 		}
@@ -124,6 +127,9 @@ func commandArgs(in AgentInput) []string {
 	}
 	args = append(args, "--json", "--skip-git-repo-check", "-c", `approval_policy="never"`, "-c", `sandbox_mode="read-only"`, "-c", `web_search="disabled"`)
 	args = append(args, "--ignore-user-config")
+	if in.Model != "" {
+		args = append(args, "--model", in.Model)
+	}
 	if in.Session != "" {
 		args = append(args, in.Session)
 	}
@@ -132,6 +138,7 @@ func commandArgs(in AgentInput) []string {
 
 type streamState struct {
 	session   string
+	model     string
 	answer    strings.Builder
 	final     string
 	failure   string
@@ -155,6 +162,7 @@ func (s *streamState) parse(agent string, line []byte, emit func(string, string)
 		}
 		if typ == "thread.started" {
 			s.session = str(e, "thread_id")
+			s.model = str(e, "model")
 		}
 		if typ == "item.completed" {
 			var item map[string]json.RawMessage
@@ -180,9 +188,13 @@ func (s *streamState) parse(agent string, line []byte, emit func(string, string)
 		}
 		if typ == "assistant" {
 			var msg struct {
+				Model   string
 				Content []struct{ Type, Text, Name string }
 			}
 			if json.Unmarshal(e["message"], &msg) == nil {
+				if validModel(msg.Model) && msg.Model != "" {
+					s.model = msg.Model
+				}
 				for _, part := range msg.Content {
 					switch part.Type {
 					case "text":
@@ -247,7 +259,7 @@ func (CLIRunner) Run(ctx context.Context, in AgentInput, emit func(string, strin
 		_ = cmd.Cancel()
 	}
 	err = cmd.Wait()
-	result := AgentResult{Session: state.session, Text: strings.TrimSpace(state.answer.String())}
+	result := AgentResult{Session: state.session, Model: state.model, Text: strings.TrimSpace(state.answer.String())}
 	if state.final != "" {
 		result.Text = state.final
 	}
@@ -268,6 +280,12 @@ func (CLIRunner) Run(ctx context.Context, in AgentInput, emit func(string, strin
 	}
 	if result.Text == "" {
 		return result, errors.New("CLI завершился без текстового ответа")
+	}
+	if in.Agent == "codex" && result.Model == "" {
+		result.Model = sessionModel("codex", result.Session)
+	}
+	if result.Model == "" || !validModel(result.Model) {
+		return result, errors.New("CLI не сообщил фактическую модель. Не удалось закрепить модель цикла; проверьте версию CLI и доступность локального журнала сессии")
 	}
 	return result, nil
 }
